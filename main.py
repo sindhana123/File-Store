@@ -1,4 +1,5 @@
 
+import os
 import asyncio
 import json
 
@@ -17,52 +18,81 @@ default_messages = {
     'FSUB': '',
     'ABOUT': 'ABOUT MSG',
     'REPLY': 'reply_text',
-    'START_PHOTO': '',
+    'START_PHOTO': os.environ.get('START_PIC', ''),
     'FSUB_PHOTO': ''
 }
 
 async def main():
     app = []
-
-    # Load setup.json
-    with open("setup.json", "r", encoding="utf-8") as f:
-        setups = json.load(f)
-
-    # Loop through each bot setup config
-    for config in setups:
-        session = config["session"]
-        workers = config["workers"]
-        db = config["db"]
-        fsubs = config["fsubs"]
-        token = config["token"]
-        admins = config["admins"]
-        messages = config.get("messages", default_messages)
-        auto_del = config["auto_del"]
-        db_uri = config["db_uri"]
-        db_name = config["db_name"]
-        api_id = int(config["api_id"])
-        api_hash = config["api_hash"]
-        protect = config["protect"]
-        disable_btn = config["disable_btn"]
-
+    
+    # Try reading from environment variables first
+    api_id_env = os.environ.get("API_ID")
+    bot_token_env = os.environ.get("BOT_TOKEN")
+    
+    if api_id_env and bot_token_env:
+        try:
+            admins_env = [int(i.strip()) for i in os.environ.get("ADMINS", "").split(",") if i.strip()]
+        except Exception:
+            admins_env = []
+            
         app.append(
             Bot(
-                session,
-                workers,
-                db,
-                fsubs,
-                token,
-                admins,
-                messages,
-                auto_del,
-                db_uri,
-                db_name,
-                api_id,
-                api_hash,
-                protect,
-                disable_btn
+                session=os.environ.get("SESSION", "bot"),
+                workers=int(os.environ.get("WORKERS", "8")),
+                db=int(os.environ.get("DB_CHANNEL", "0")),
+                fsub=[], 
+                token=os.environ.get("BOT_TOKEN", ""),
+                admins=admins_env,
+                messages=default_messages,
+                auto_del=int(os.environ.get("AUTO_DEL", "300")),
+                db_uri=os.environ.get("DATABASE_URI", ""),
+                db_name=os.environ.get("DATABASE_NAME", "Cluster0"),
+                api_id=int(api_id_env),
+                api_hash=os.environ.get("API_HASH", ""),
+                protect=os.environ.get("PROTECT", "False").lower() in ("true", "1", "yes"),
+                disable_btn=os.environ.get("DISABLE_BTN", "False").lower() in ("true", "1", "yes")
             )
         )
+    else:
+        # Load setup.json
+        with open("setup.json", "r", encoding="utf-8") as f:
+            setups = json.load(f)
+
+        # Loop through each bot setup config
+        for config in setups:
+            session = config["session"]
+            workers = config["workers"]
+            db = config["db"]
+            fsubs = config["fsubs"]
+            token = config["token"]
+            admins = config["admins"]
+            messages = config.get("messages", default_messages)
+            auto_del = config["auto_del"]
+            db_uri = config["db_uri"]
+            db_name = config["db_name"]
+            api_id = int(config["api_id"])
+            api_hash = config["api_hash"]
+            protect = config["protect"]
+            disable_btn = config["disable_btn"]
+
+            app.append(
+                Bot(
+                    session,
+                    workers,
+                    db,
+                    fsubs,
+                    token,
+                    admins,
+                    messages,
+                    auto_del,
+                    db_uri,
+                    db_name,
+                    api_id,
+                    api_hash,
+                    protect,
+                    disable_btn
+                )
+            )
 
     await compose(app)
 
