@@ -1,6 +1,13 @@
 
 import asyncio
 import json
+
+# Ensure event loop is set for Pyrogram's module-level get_event_loop() calls
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from bot import Bot, web_app
 from pyrogram import compose
 
