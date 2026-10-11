@@ -11,16 +11,41 @@ except RuntimeError:
 # Monkey patch for pyromod Identifier error in Python 3.14
 try:
     from pyrogram.types.pyromod.identifier import Identifier
-    def _get_annotations(self):
-        # We need to bypass the property to get the class annotations smoothly
+
+    def safe_get_annotations(cls):
         d = {}
-        for c in reversed(self.__class__.__mro__):
+        for c in reversed(cls.__mro__):
             if '__annotations__' in c.__dict__:
                 ann = c.__dict__['__annotations__']
                 if not isinstance(ann, property):
                     d.update(ann)
         return d
-    Identifier.__annotations__ = property(_get_annotations)
+
+    def _patched_matches(self, update):
+        annotations = safe_get_annotations(self.__class__)
+        for field in annotations:
+            pattern_value = getattr(self, field, None)
+            update_value = getattr(update, field, None)
+            if pattern_value is not None:
+                if isinstance(update_value, list):
+                    if isinstance(pattern_value, list):
+                        if not set(update_value).intersection(set(pattern_value)): return False
+                    elif pattern_value not in update_value: return False
+                elif isinstance(pattern_value, list):
+                    if update_value not in pattern_value: return False
+                elif update_value != pattern_value: return False
+        return True
+
+    def _patched_count_populated(self):
+        non_null_count = 0
+        annotations = safe_get_annotations(self.__class__)
+        for attr in annotations:
+            if getattr(self, attr, None) is not None:
+                non_null_count += 1
+        return non_null_count
+
+    Identifier.matches = _patched_matches
+    Identifier.count_populated = _patched_count_populated
 except Exception:
     pass
 
