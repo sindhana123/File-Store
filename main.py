@@ -2,9 +2,14 @@ import os
 import asyncio
 import json
 
+# Ensure event loop is set for Pyrogram's module-level get_event_loop() calls
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 # Monkey patch for pyromod Identifier error in Python 3.14
 try:
-    # Attempt to patch before Pyrogram loads it
     from pyrogram.types.pyromod.identifier import Identifier
     def _get_annotations(self):
         # We need to bypass the property to get the class annotations smoothly
@@ -18,12 +23,6 @@ try:
     Identifier.__annotations__ = property(_get_annotations)
 except Exception:
     pass
-
-# Ensure event loop is set for Pyrogram's module-level get_event_loop() calls
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
 
 from bot import Bot, web_app
 from pyrogram import compose
