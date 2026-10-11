@@ -207,92 +207,88 @@ async def start_command(client: Client, message: Message):
 
                     # Fall through to file sending logic...
 
-        # -------------------------- HYBRID TOKEN / BASE64 DECODE --------------------------
-        # 🔐 NEW: Check if it's a token-format link (alphanumeric, 12-16 chars)
-        from helper.helper_func import is_token_format
-        
-        # Batch links are NOT tokens in DB, they are IDs to be resolved by handler or Shortener
-        is_batch = original_base64.startswith("batch_")
-        
-        if not is_batch and is_token_format(original_base64):
-            # ---- Rate limit check ----
-            if await client.mongodb.is_token_rate_limited(user_id):
-                return await message.reply(
-                    f"<blockquote>⏳ <b>{sc('too many invalid attempts')}</b></blockquote>\n"
-                    f"<blockquote><b>{sc('please wait a minute and try again')}</b></blockquote>"
-                )
-            
-            # ---- Resolve token from MongoDB ----
-            token_doc = await client.mongodb.resolve_file_token(original_base64)
-            
-            if not token_doc:
-                # Record invalid attempt for rate limiting
-                await client.mongodb.record_invalid_token_attempt(user_id)
-                return await message.reply(
-                    f"<blockquote>❌ <b>{sc('invalid or expired link')}</b></blockquote>\n"
-                    f"<blockquote><b>{sc('please get a new link')}</b></blockquote>"
-                )
-            
-            # ---- Token resolved! Build ids from token data ----
-            channel_id = token_doc["channel_id"]
-            start_msg_id = token_doc["msg_id"]
-            end_msg_id = token_doc.get("end_msg_id")
-            
-            if end_msg_id:
-                ids = range(start_msg_id, end_msg_id + 1)
-            else:
-                ids = [start_msg_id]
-                
-            custom_chat_id = channel_id
-            
-        elif is_batch:
-            # Raw Batch Link: Skip decoding (it's not base64) and fall through to Check/Shortener
+        # -------------------------- ALGORITHM BASE64 / TOKEN DECODE --------------------------
+        ids = []
+        custom_chat_id = None
+
+        if original_base64.startswith("batch_"):
+            # Raw Batch Link: handled by batch_handler
             ids = []
             custom_chat_id = None
         else:
-            # ---- OLD Base64 path (backward compatible) ----
+            decoded_success = False
             try:
                 string = await decode(original_base64)
                 argument = string.split("-")
-            except Exception:
-                return
-        
-            ids = []
-            custom_chat_id = None
-        
-            if len(argument) == 3:
+                
+                primary_db = getattr(client, 'db_channel_id', None) or int(client.db)
+                all_db_channels = [primary_db]
                 try:
-                    val1 = int(argument[1])
-                    val2 = int(argument[2])
-                    
-                    if val2 < 1000000: # Message ID < 1 Million → New Format
-                        channel_id = val1
-                        msg_id = val2
-                        custom_chat_id = int(f"-100{channel_id}")
-                        ids = [msg_id]
-                    else:
-                        # Old Format (Range)
-                        start = int(val1 / abs(client.db))
-                        end = int(val2 / abs(client.db))
-                        ids = range(start, end + 1) if start <= end else list(range(start, end - 1, -1))
-                except:
-                    pass
-                try:
-                    arg1 = int(argument[1])
-                    arg2 = int(argument[2])
-                    full_chat_id = int(f"-100{arg1}")
-                    message_id = arg2
-                    ids = [message_id]
-                    custom_chat_id = full_chat_id
-                except:
+                    extra_channels = await client.mongodb.get_db_channels()
+                    all_db_channels.extend([int(c) for c in extra_channels if int(c) != primary_db])
+                except Exception:
                     pass
 
-            elif len(argument) == 2:
-                try:
-                    # Format: get-GENERATED_ID (old single-file format)
-                    ids = [int(int(argument[1]) / abs(client.db))]
-                except:
-                    return
+                if len(argument) == 3:
+                    encoded_start = int(argument[1])
+                    encoded_end = int(argument[2])
+                    source_channel_id = None
+                    
+                    for ch_id in all_db_channels:
+                        mult = abs(ch_id)
+                        if encoded_start % mult == 0 and encoded_end % mult == 0:
+                            source_channel_id = ch_id
+                            start = int(encoded_start / mult)
+                            end = int(encoded_end / mult)
+                            break
+                    
+                    if source_channel_id is None:
+                        source_channel_id = primary_db
+                        start = int(encoded_start / abs(primary_db))
+                        end = int(encoded_end / abs(primary_db))
+
+                    ids = list(range(start, end + 1)) if start <= end else list(range(start, end - 1, -1))
+                    custom_chat_id = source_channel_id
+                    decoded_success = True
+
+                elif len(argument) == 2:
+                    encoded_msg = int(argument[1])
+                    source_channel_id = None
+                    
+                    for ch_id in all_db_channels:
+                        mult = abs(ch_id)
+                        if encoded_msg % mult == 0:
+                            source_channel_id = ch_id
+                            ids = [int(encoded_msg / mult)]
+                            break
+                            
+                    if source_channel_id is None:
+                        source_channel_id = primary_db
+                        ids = [int(encoded_msg / abs(primary_db))]
+                    custom_chat_id = source_channel_id
+                    decoded_success = True
+            except Exception:
+                decoded_success = False
+
+            # Backward compatibility fallback for MongoDB tokens
+            if not decoded_success:
+                from helper.helper_func import is_token_format
+                if is_token_format(original_base64):
+                    token_doc = await client.mongodb.resolve_file_token(original_base64)
+                    if token_doc:
+                        channel_id = token_doc["channel_id"]
+                        start_msg_id = token_doc["msg_id"]
+                        end_msg_id = token_doc.get("end_msg_id")
+                        ids = list(range(start_msg_id, end_msg_id + 1)) if end_msg_id else [start_msg_id]
+                        custom_chat_id = channel_id
+                        decoded_success = True
+                    else:
+                        return await message.reply(
+                            f"<blockquote>❌ <b>{sc('invalid or expired link')}</b></blockquote>\n"
+                            f"<blockquote><b>{sc('please get a new link')}</b></blockquote>"
+                        )
+                else:
+                    return await message.reply("⚠️ Invalid or expired link.")
 
         
         # Check if credit system is enabled globally

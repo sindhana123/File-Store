@@ -1,177 +1,128 @@
-# Made by @Awakeners_Bots
-# GitHub: https://github.com/Awakener_Bots
-
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from helper.helper_func import encode, get_message_id
 from helper.font_converter import to_small_caps as sc
+import humanize
+import io
 
+async def get_db_channels_info(client):
+    """Get formatted database channels information with links"""
+    primary_db = getattr(client, 'db_channel_id', None) or int(client.db)
+    try:
+        extra_channels = await client.mongodb.get_db_channels()
+    except Exception:
+        extra_channels = []
+    
+    if not extra_channels:
+        try:
+            primary_chat = getattr(client, 'db_channel', None) or await client.get_chat(primary_db)
+            if hasattr(primary_chat, 'invite_link') and primary_chat.invite_link:
+                return f"<blockquote>✦ ᴘʀɪᴍᴀʀʏ ᴅʙ ᴄʜᴀɴɴᴇʟ: <a href='{primary_chat.invite_link}'>{primary_chat.title}</a></blockquote>"
+            else:
+                title = getattr(primary_chat, 'title', primary_db)
+                return f"<blockquote>✦ ᴘʀɪᴍᴀʀʏ ᴅʙ ᴄʜᴀɴɴᴇʟ: {title} (`{primary_db}`)</blockquote>"
+        except Exception:
+            return f"<blockquote>✦ ᴘʀɪᴍᴀʀʏ ᴅʙ ᴄʜᴀɴɴᴇʟ: `{primary_db}`</blockquote>"
+    
+    channels_info = ["<blockquote>✦ ᴀᴠᴀɪʟᴀʙʟᴇ ᴅᴀᴛᴀʙᴀsᴇ ᴄʜᴀɴɴᴇʟs:</blockquote>"]
+    all_channels = [primary_db] + [int(ch) for ch in extra_channels if int(ch) != primary_db]
+    for ch_id in all_channels:
+        is_primary = (ch_id == primary_db)
+        is_primary_text = "✦ ᴘʀɪᴍᴀʀʏ" if is_primary else "• sᴇᴄᴏɴᴅᴀʀʏ"
+        try:
+            chat = await client.get_chat(ch_id)
+            if hasattr(chat, 'invite_link') and chat.invite_link:
+                channels_info.append(f"{is_primary_text}: <a href='{chat.invite_link}'>{chat.title}</a>")
+            else:
+                channels_info.append(f"{is_primary_text}: {getattr(chat, 'title', ch_id)} (`{ch_id}`)")
+        except Exception:
+            channels_info.append(f"{is_primary_text}: `{ch_id}`")
+            
+    return "\n".join(channels_info)
+
+# ==================== BATCH COMMAND ====================
 @Client.on_message(filters.private & filters.command('batch'))
 async def batch(client: Client, message: Message):
     if message.from_user.id not in client.admins:
         return await message.reply(client.reply_text)
-        
-    cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {sc('cancel')}", callback_data="cancel_batch_process")]])
     
-    # Step 1: First Message
+    db_channels_info = await get_db_channels_info(client)
+    
     while True:
         try:
-            ask_msg = await message.reply(f"{sc('forward the')} **{sc('first message')}** {sc('from db channel (with quotes)')}..\n\n{sc('or send the db channel post link')}", reply_markup=cancel_btn)
-            first_response = await client.listen(chat_id=message.from_user.id, filters=filters.user(message.from_user.id), timeout=60)
+            first_message = await client.ask(
+                text=f"""<blockquote>ꜰᴏʀᴡᴀʀᴅ ᴛʜᴇ ꜰɪʀsᴛ ᴍᴇssᴀɢᴇ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)..</blockquote>
+{db_channels_info}
+
+<blockquote>ᴏʀ sᴇɴᴅ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴘᴏsᴛ ʟɪɴᴋ</blockquote>""",
+                chat_id=message.from_user.id,
+                filters=(filters.forwarded | (filters.text & ~filters.forwarded)),
+                timeout=60
+            )
         except Exception:
             return
             
-        if isinstance(first_response, CallbackQuery):
-            if first_response.data == 'cancel_batch_process':
-                await first_response.answer(sc("cancelled"), show_alert=True)
-                await first_response.message.delete()
-                await message.reply(f"❌ **{sc('batch process cancelled.')}**")
-                return
-            else:
-                # Ignore other callbacks or handle them?
-                await first_response.answer(sc("wrong button"), show_alert=True)
-                continue
-            
-        f_msg_id = await get_message_id(client, first_response)
+        f_msg_id, source_channel_id = await get_message_id(client, first_message)
         if f_msg_id:
-            # Extract channel ID for extra DB support
-            channel_id = client.db_channel.id
-            if first_response.forward_from_chat:
-                channel_id = first_response.forward_from_chat.id
-            elif first_response.text and "https://t.me/" in first_response.text:
-                import re
-                match = re.search(r"https://t.me/(?:c/)?([^/]+)/\d+", first_response.text)
-                if match:
-                    ch_str = match.group(1)
-                    if ch_str.isdigit():
-                        channel_id = int(f"-100{ch_str}")
-                    else:
-                        try:
-                            chat = await client.get_chat(ch_str)
-                            channel_id = chat.id
-                        except:
-                            pass
-            
-            await ask_msg.delete() 
             break
         else:
-            await first_response.reply(f"❌ {sc('error')}\n\n{sc('this forwarded post is not from my db channel or this link is taken from db channel')}", quote = True)
+            await first_message.reply("<blockquote>✗ ᴇʀʀᴏʀ</blockquote>\n\nᴛʜɪs ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴘᴏsᴛ ɪs ɴᴏᴛ ꜰʀᴏᴍ ᴍʏ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴏʀ ᴛʜɪs ʟɪɴᴋ ɪs ᴛᴀᴋᴇɴ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ", quote=True)
             continue
 
-    # Step 2: Last Message
     while True:
         try:
-            ask_msg = await message.reply(f"{sc('forward the')} **{sc('last message')}** {sc('from db channel (with quotes)')}..\n{sc('or send the db channel post link')}", reply_markup=cancel_btn)
-            second_response = await client.listen(chat_id=message.from_user.id, filters=filters.user(message.from_user.id), timeout=60)
+            second_message = await client.ask(
+                text=f"""<blockquote>ꜰᴏʀᴡᴀʀᴅ ᴛʜᴇ ʟᴀsᴛ ᴍᴇssᴀɢᴇ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)..</blockquote>
+{db_channels_info}
+
+<blockquote>ᴏʀ sᴇɴᴅ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴘᴏsᴛ ʟɪɴᴋ</blockquote>""",
+                chat_id=message.from_user.id,
+                filters=(filters.forwarded | (filters.text & ~filters.forwarded)),
+                timeout=60
+            )
         except Exception:
             return
-        
-        if isinstance(second_response, CallbackQuery):
-            if second_response.data == 'cancel_batch_process':
-                await second_response.answer(sc("cancelled"), show_alert=True)
-                await second_response.message.delete()
-                await message.reply(f"❌ **{sc('batch process cancelled.')}**")
-                return
-            else:
-                await second_response.answer(sc("wrong button"), show_alert=True)
-                continue
-
-        s_msg_id = await get_message_id(client, second_response)
+            
+        s_msg_id, _ = await get_message_id(client, second_message)
         if s_msg_id:
-            await ask_msg.delete()
             break
         else:
-            await second_response.reply(f"❌ {sc('error')}\n\n{sc('this forwarded post is not from my db channel or this link is taken from db channel')}", quote = True)
+            await second_message.reply("<blockquote>✗ ᴇʀʀᴏʀ</blockquote>\n\nᴛʜɪs ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴘᴏsᴛ ɪs ɴᴏᴛ ꜰʀᴏᴍ ᴍʏ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴏʀ ᴛʜɪs ʟɪɴᴋ ɪs ᴛᴀᴋᴇɴ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ", quote=True)
             continue
 
-
-    # Calculate IDs
-    # batch command generates a RANGE. Hybrid token system is for SINGLE files.
-    # We stick to base64 for ranges for now, but we add INFO to the message.
+    # Algorithm based hash encoding
+    string = f"get-{f_msg_id * abs(source_channel_id)}-{s_msg_id * abs(source_channel_id)}"
+    base64_string = await encode(string)
+    link = f"https://t.me/{client.username}?start={base64_string}"
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 sʜᴀʀᴇ ᴜʀʟ", url=f'https://telegram.me/share/url?url={link}')]])
     
-    # Fetch first message to get a name
-    try:
-        first_msg = await client.get_messages(channel_id, f_msg_id)
-        batch_name = ""
-        if first_msg:
-             if first_msg.document:
-                 batch_name = first_msg.document.file_name
-             elif first_msg.caption:
-                 batch_name = first_msg.caption.split("\n")[0][:50] + "..."
-        
-        info_text = f"<blockquote><b>📦 {sc('batch create')}</b>\n"
-        if batch_name:
-             info_text += f"📄 {batch_name}\n"
-        info_text += f"🔢 {sc('range')}: {f_msg_id} - {s_msg_id}\n"
-        
-        # Add Auto-Delete Info
-        if client.auto_del > 0:
-            import humanize
-            info_text += f"⏳ {sc('auto delete')}: {humanize.naturaldelta(client.auto_del)}"
-            
-        info_text += "</blockquote>\n\n"
-        
-    except:
-        info_text = ""
-
-    # Hybrid Token for Batch Range
-    try:
-        token = await client.mongodb.create_file_token(channel_id, f_msg_id, end_msg_id=s_msg_id)
-        link = f"https://t.me/{client.username}?start={token}"
-    except Exception as e:
-        print(f"Token creation failed for batch: {e}")
-        string = f"get-{f_msg_id * abs(channel_id)}-{s_msg_id * abs(channel_id)}"
-        base64_string = await encode(string)
-        link = f"https://t.me/{client.username}?start={base64_string}"
-        
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"🔁 {sc('share url')}", url=f'https://telegram.me/share/url?url={link}')]])
-    await second_response.reply_text(f"{info_text}<b>{sc('here is your link')}</b>\n\n<code>{link}</code>", quote=True, reply_markup=reply_markup)
+    info_text = f"<blockquote><b>📦 {sc('batch link created')}</b>\n🔢 {sc('range')}: {f_msg_id} - {s_msg_id}"
+    if client.auto_del > 0:
+        info_text += f"\n⏳ {sc('auto delete')}: {humanize.naturaldelta(client.auto_del)}"
+    info_text += "</blockquote>\n\n"
+    
+    await second_message.reply_text(f"{info_text}<blockquote>✓ ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʙᴀᴛᴄʜ ʟɪɴᴋ</blockquote>\n\n<code>{link}</code>", quote=True, disable_web_page_preview=True, reply_markup=reply_markup)
 
 
+# ==================== GENLINK COMMAND ====================
 @Client.on_message(filters.private & filters.command('genlink'))
 async def link_generator(client: Client, message: Message):
     if message.from_user.id not in client.admins:
         return await message.reply(client.reply_text)
+    
+    main_channel = getattr(client, 'db_channel_id', None) or int(client.db)
 
-    main_channel = getattr(client, 'db_channel_id', client.db)
-
-    # ── SHORTCUT: If /genlink is used as a reply, copy that message to DB and link it ──
+    # Shortcut: If replied to a message, copy/link it directly
     if message.reply_to_message:
         replied = message.reply_to_message
         processing_msg = await message.reply(f"🔄 {sc('processing')}...")
-
         try:
-            # Check if the replied message is already from one of our DB channels
-            channel_id = main_channel
-            msg_id = None
-
-            try:
-                _fwd_chat_id = None
-                _fwd_msg_id = None
-                if hasattr(replied, 'forward_origin') and replied.forward_origin:
-                    if replied.forward_origin.type == "channel":
-                        _fwd_chat_id = replied.forward_origin.chat.id
-                        _fwd_msg_id = replied.forward_origin.message_id
-                elif hasattr(replied, 'forward_from_chat') and replied.forward_from_chat:
-                    _fwd_chat_id = replied.forward_from_chat.id
-                    _fwd_msg_id = getattr(replied, 'forward_from_message_id', None)
-
-                if _fwd_chat_id:
-                    extra_channels = await client.mongodb.get_db_channels()
-                    all_db_channels = [main_channel] + extra_channels
-                    if _fwd_chat_id in all_db_channels and _fwd_msg_id:
-                        msg_id = _fwd_msg_id
-                        channel_id = _fwd_chat_id
-            except Exception:
-                pass
-
-            if not msg_id:
-                # Copy the replied message to the main DB channel
+            f_msg_id, source_channel_id = await get_message_id(client, replied)
+            if not f_msg_id:
                 post = await replied.copy(chat_id=main_channel, caption=replied.caption)
-                msg_id = post.id
-                channel_id = main_channel
+                f_msg_id = post.id
+                source_channel_id = main_channel
 
-            # Extract filename for display
             file_name = ""
             if replied.document:
                 file_name = replied.document.file_name or ""
@@ -180,21 +131,14 @@ async def link_generator(client: Client, message: Message):
             elif replied.text:
                 file_name = replied.text[:50]
 
-            # Generate link
-            try:
-                token = await client.mongodb.create_file_token(channel_id, msg_id)
-                link = f"https://t.me/{client.username}?start={token}"
-            except Exception:
-                base64_string = await encode(f"get-{msg_id * abs(channel_id)}")
-                link = f"https://t.me/{client.username}?start={base64_string}"
-
+            base64_string = await encode(f"get-{f_msg_id * abs(source_channel_id)}")
+            link = f"https://t.me/{client.username}?start={base64_string}"
             reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"🔁 {sc('share url')}", url=f'https://telegram.me/share/url?url={link}')]])
 
             text = "<blockquote>"
             if file_name:
                 text += f"<b>📂 {file_name}</b>\n"
             if client.auto_del > 0:
-                import humanize
                 text += f"⏳ {sc('auto delete')}: {humanize.naturaldelta(client.auto_del)}"
             if text == "<blockquote>":
                 text = ""
@@ -203,161 +147,239 @@ async def link_generator(client: Client, message: Message):
             text += f"<b>{sc('here is your link')}</b>\n\n<code>{link}</code>"
 
             await processing_msg.edit_text(text, reply_markup=reply_markup)
-
         except Exception as e:
             await processing_msg.edit_text(f"❌ {sc('error')}: {e}")
         return
 
-    # ── INTERACTIVE FLOW: No reply, ask admin to forward/link ──
-    cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"❌ {sc('cancel')}", callback_data="cancel_batch_process")]])
+    # Interactive flow
+    db_channels_info = await get_db_channels_info(client)
+    while True:
+        try:
+            channel_message = await client.ask(
+                text=f"""<blockquote>ꜰᴏʀᴡᴀʀᴅ ᴍᴇssᴀɢᴇ ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)..</blockquote>
+{db_channels_info}
+
+<blockquote>ᴏʀ sᴇɴᴅ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴘᴏsᴛ ʟɪɴᴋ</blockquote>""",
+                chat_id=message.from_user.id,
+                filters=(filters.forwarded | (filters.text & ~filters.forwarded)),
+                timeout=60
+            )
+        except Exception:
+            return
+            
+        msg_id, source_channel_id = await get_message_id(client, channel_message)
+        if msg_id:
+            break
+        else:
+            await channel_message.reply("<blockquote>✗ ᴇʀʀᴏʀ</blockquote>\n\nᴛʜɪs ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴘᴏsᴛ ɪs ɴᴏᴛ ꜰʀᴏᴍ ᴍʏ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴏʀ ᴛʜɪs ʟɪɴᴋ ɪs ɴᴏᴛ ᴛᴀᴋᴇɴ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ", quote=True)
+            continue
+
+    base64_string = await encode(f"get-{msg_id * abs(source_channel_id)}")
+    link = f"https://t.me/{client.username}?start={base64_string}"
+    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔁 sʜᴀʀᴇ ᴜʀʟ", url=f'https://telegram.me/share/url?url={link}')]])
+    await channel_message.reply_text(f"<blockquote>✓ ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʟɪɴᴋ</blockquote>\n\n<code>{link}</code>", quote=True, disable_web_page_preview=True, reply_markup=reply_markup)
+
+
+# ==================== NBATCH COMMAND ====================
+@Client.on_message(filters.private & filters.command("nbatch"))
+async def nbatch(client: Client, message: Message):
+    if message.from_user.id not in client.admins:
+        return await message.reply(client.reply_text)
+    
+    args = message.text.split()
+    if len(args) < 2 or not args[1].isdigit():
+        await message.reply("<blockquote>✗ ɪɴᴠᴀʟɪᴅ ꜰᴏʀᴍᴀᴛ!</blockquote> ᴜsᴇ: `/nbatch {number}`")
+        return
+    
+    batch_size = int(args[1])
+    db_channels_info = await get_db_channels_info(client)
+    
+    while True:
+        try:
+            first_message = await client.ask(
+                text=f"""<blockquote>🚀 sᴇɴᴅ ᴅʙ ᴄʜᴀɴɴᴇʟ ꜰɪʀsᴛ ᴍᴇssᴀɢᴇ ʟɪɴᴋ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)...</blockquote>
+{db_channels_info}""",
+                chat_id=message.from_user.id,
+                filters=(filters.text & ~filters.forwarded),
+                timeout=60
+            )
+        except Exception:
+            return
+    
+        f_msg_id, source_channel_id = await get_message_id(client, first_message)
+        if f_msg_id:
+            break
+        else:
+            await first_message.reply("<blockquote>😫 ɪɴᴠᴀʟɪᴅ!</blockquote> sᴇɴᴅ ᴄᴏʀʀᴇᴄᴛ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴍᴇssᴀɢᴇ ʟɪɴᴋ.", quote=True)
+            continue
+    
+    s_msg_id = f_msg_id + batch_size - 1
+    string = f"get-{f_msg_id * abs(source_channel_id)}-{s_msg_id * abs(source_channel_id)}"
+    base64_string = await encode(string)
+    link = f"https://t.me/{client.username}?start={base64_string}"
+    
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📫 ʏᴏᴜʀ ʙᴀᴛᴄʜ ᴜʀʟ", url=f'https://telegram.me/share/url?url={link}')]
+    ])
+    
+    await first_message.reply_text(f"<blockquote>✓ ʜᴇʀᴇ ɪs ʏᴏᴜʀ ʙᴀᴛᴄʜ ʟɪɴᴋ ({batch_size} files)</blockquote>\n\n<code>{link}</code>", quote=True, disable_web_page_preview=True, reply_markup=reply_markup)
+
+
+# ==================== BULK COMMAND ====================
+@Client.on_message(filters.private & filters.command("bulk"))
+async def bulk(client: Client, message: Message):
+    if message.from_user.id not in client.admins:
+        return await message.reply(client.reply_text)
+    
+    db_channels_info = await get_db_channels_info(client)
+    
+    while True:
+        try:
+            first_message = await client.ask(
+                text=f"""<blockquote>ꜰᴏʀᴡᴀʀᴅ ᴛʜᴇ ꜰɪʀsᴛ ᴍᴇssᴀɢᴇ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)..</blockquote>\n{db_channels_info}\n\n<blockquote>ᴏʀ sᴇɴᴅ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴘᴏsᴛ ʟɪɴᴋ</blockquote>""",
+                chat_id=message.from_user.id,
+                filters=(filters.forwarded | (filters.text & ~filters.forwarded)),
+                timeout=60
+            )
+        except Exception:
+            return
+        f_msg_id, source_channel_id = await get_message_id(client, first_message)
+        if f_msg_id:
+            break
+        else:
+            await first_message.reply("<blockquote>✗ ᴇʀʀᴏʀ</blockquote>\n\nᴛʜɪs ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴘᴏsᴛ ɪs ɴᴏᴛ ꜰʀᴏᴍ ᴍʏ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴏʀ ᴛʜɪs ʟɪɴᴋ ɪs ᴛᴀᴋᴇɴ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ", quote=True)
+            continue
 
     while True:
         try:
-            ask_msg = await message.reply(f"{sc('forward message from the db channel (with quotes)')}..\\n{sc('or send the db channel post link')}", reply_markup=cancel_btn)
-            channel_message = await client.listen(chat_id=message.from_user.id, filters=filters.user(message.from_user.id), timeout=60)
-        except:
+            second_message = await client.ask(
+                text=f"""<blockquote>ꜰᴏʀᴡᴀʀᴅ ᴛʜᴇ ʟᴀsᴛ ᴍᴇssᴀɢᴇ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ (ᴡɪᴛʜ ǫᴜᴏᴛᴇs)..</blockquote>\n{db_channels_info}\n\n<blockquote>ᴏʀ sᴇɴᴅ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴘᴏsᴛ ʟɪɴᴋ</blockquote>""",
+                chat_id=message.from_user.id,
+                filters=(filters.forwarded | (filters.text & ~filters.forwarded)),
+                timeout=60
+            )
+        except Exception:
             return
-
-        if isinstance(channel_message, CallbackQuery):
-            if channel_message.data == 'cancel_batch_process':
-                await channel_message.answer(sc("cancelled"), show_alert=True)
-                await channel_message.message.delete()
-                await message.reply(f"❌ **{sc('process cancelled.')}**")
-                return
-            else:
-                await channel_message.answer(sc("wrong button"), show_alert=True)
-                continue
-
-        msg_id = await get_message_id(client, channel_message)
-        if msg_id:
-            await ask_msg.delete()
+        s_msg_id, _ = await get_message_id(client, second_message)
+        if s_msg_id:
             break
         else:
-            await channel_message.reply(f"❌ {sc('error')}\n\n{sc('this forwarded post is not from my db channel or this link is not taken from db channel')}", quote=True)
+            await second_message.reply("<blockquote>✗ ᴇʀʀᴏʀ</blockquote>\n\nᴛʜɪs ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴘᴏsᴛ ɪs ɴᴏᴛ ꜰʀᴏᴍ ᴍʏ ᴅʙ ᴄʜᴀɴɴᴇʟ ᴏʀ ᴛʜɪs ʟɪɴᴋ ɪs ᴛᴀᴋᴇɴ ꜰʀᴏᴍ ᴅʙ ᴄʜᴀɴɴᴇʟ", quote=True)
             continue
+            
+    if f_msg_id > s_msg_id:
+        f_msg_id, s_msg_id = s_msg_id, f_msg_id
 
-    channel_id = getattr(client, 'db_channel_id', client.db)
-
-    # Fetch content name
-    file_name = ""
-    try:
-        f_msg = await client.get_messages(channel_id, msg_id)
-        if f_msg:
-            if f_msg.document:
-                file_name = f_msg.document.file_name
-            elif f_msg.caption:
-                file_name = f_msg.caption.split("\n")[0][:50]
-    except:
-        pass
-
-    # Hybrid Token
-    try:
-        token = await client.mongodb.create_file_token(channel_id, msg_id)
-        link = f"https://t.me/{client.username}?start={token}"
-    except:
-        base64_string = await encode(f"get-{msg_id * abs(channel_id)}")
+    processing_msg = await second_message.reply("⏳ Processing...", quote=True)
+    
+    msg_ids = list(range(f_msg_id, s_msg_id + 1))
+    messages = []
+    
+    for i in range(0, len(msg_ids), 200):
+        try:
+            chunk = await client.get_messages(chat_id=source_channel_id, message_ids=msg_ids[i:i+200])
+            for msg in chunk:
+                if msg and not msg.empty:
+                    messages.append(msg)
+        except Exception:
+            pass
+    
+    file_links = []
+    count = 1
+    for msg in messages:
+        file_name = None
+        if getattr(msg, "document", None):
+            file_name = msg.document.file_name
+        elif getattr(msg, "video", None):
+            file_name = msg.video.file_name
+        elif getattr(msg, "audio", None):
+            file_name = msg.audio.file_name
+            
+        if not file_name:
+            if msg.media:
+                file_name = f"Unknown_Media_{msg.id}"
+            else:
+                continue
+            
+        base64_string = await encode(f"get-{msg.id * abs(source_channel_id)}")
         link = f"https://t.me/{client.username}?start={base64_string}"
-
-    reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"🔁 {sc('share url')}", url=f'https://telegram.me/share/url?url={link}')]])
-
-    text = "<blockquote>"
-    if file_name:
-        text += f"<b>📂 {file_name}</b>\n"
-    if client.auto_del > 0:
-        import humanize
-        text += f"⏳ {sc('auto delete')}: {humanize.naturaldelta(client.auto_del)}"
-    if text == "<blockquote>":
-        text = ""
+        file_links.append(f"{count}. {file_name} - {link}")
+        count += 1
+        
+    db_key = str(source_channel_id)[-4:] if len(str(source_channel_id)) >= 4 else str(source_channel_id)
+        
+    batch_string = f"get-{f_msg_id * abs(source_channel_id)}-{s_msg_id * abs(source_channel_id)}"
+    base64_batch = await encode(batch_string)
+    batch_link = f"https://t.me/{client.username}?start={base64_batch}"
+        
+    final_text = f"📦 Bulk Upload Complete\n\nTotal Files: {len(file_links)}\nDB Key: {db_key}\n\nDownload URLs:\n\n"
+    final_text += "\n".join(file_links)
+    final_text += f"\n\n🔗 <b>Batch Link:</b> {batch_link}"
+    
+    if len(final_text) > 4050:
+        file_bytes = io.BytesIO(final_text.encode('utf-8'))
+        file_bytes.name = "bulk_links.txt"
+        await second_message.reply_document(document=file_bytes, caption=f"📦 Bulk Upload Complete\nTotal Files: {len(file_links)}\nDB Key: {db_key}\n\nThe text was too long, so here is the text file.", quote=True)
+        await processing_msg.delete()
     else:
-        text += "</blockquote>\n\n"
-    text += f"<b>{sc('here is your link')}</b>\n\n<code>{link}</code>"
-
-    await channel_message.reply_text(text, quote=True, reply_markup=reply_markup)
+        await processing_msg.edit_text(final_text, disable_web_page_preview=True)
 
 
-@Client.on_message(filters.private & (filters.document | filters.video | filters.audio) & ~filters.command(["start", "batch", "genlink"]))
+# ==================== SINGLE FILE UPLOAD IN PM ====================
+@Client.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.photo) & ~filters.command(["start", "batch", "nbatch", "genlink", "bulk", "settings", "help"]))
 async def single_file_gen_handler(client: Client, message: Message):
     if message.from_user.id not in client.admins:
         return
 
-    # Skip if message is a command (handled by other handlers)
     if message.text and message.text.startswith("/"):
         return
 
     try:
         msg = await message.reply(f"🔄 {sc('processing')}...", quote=True)
+        main_channel = getattr(client, 'db_channel_id', None) or int(client.db)
         
-        main_channel = getattr(client, 'db_channel_id', client.db)
-        
-        # If message is forwarded from DB Channel, use existing ID
-        channel_id = main_channel
-        msg_id = None
-        
-        # Compat: support both new Pyrogram (forward_origin) and old (forward_from_chat)
-        try:
-            _fwd_chat_id = None
-            _fwd_msg_id = None
-            if hasattr(message, 'forward_origin') and message.forward_origin:
-                if message.forward_origin.type == "channel":
-                    _fwd_chat_id = message.forward_origin.chat.id
-                    _fwd_msg_id = message.forward_origin.message_id
-            elif hasattr(message, 'forward_from_chat') and message.forward_from_chat:
-                _fwd_chat_id = message.forward_from_chat.id
-                _fwd_msg_id = getattr(message, 'forward_from_message_id', None)
-            
-            if _fwd_chat_id:
-                extra_channels = await client.mongodb.get_db_channels()
-                all_db_channels = [main_channel] + extra_channels
-                if _fwd_chat_id in all_db_channels and _fwd_msg_id:
-                    msg_id = _fwd_msg_id
-                    channel_id = _fwd_chat_id
-        except Exception:
-            pass
-        
-        if not msg_id:
-             # Not from our DB or clean upload, copy to selected channel
-             channel_id = await client.mongodb.get_next_db_channel(main_channel)
-             post = await message.copy(chat_id=channel_id, caption=message.caption)
-             msg_id = post.id
-             
-        # Extract filename for display
-        file_name = message.document.file_name if message.document else ""
-        if not file_name and message.caption:
-             file_name = message.caption.split("\n")[0][:50]
-            
-        # 🔐 Generate hybrid token (stored in MongoDB)
-        try:
-            token = await client.mongodb.create_file_token(channel_id, msg_id)
-            link = f"https://t.me/{client.username}?start={token}"
-        except Exception as e:
-            print(f"Token creation failed: {e}")
-            # Fallback to Base64
-            base64_string = await encode(f"get-{msg_id * abs(channel_id)}")
-            link = f"https://t.me/{client.username}?start={base64_string}"
+        f_msg_id, source_channel_id = await get_message_id(client, message)
+        if not f_msg_id:
+            # Copy to primary or next DB channel
+            try:
+                channel_id = await client.mongodb.get_next_db_channel(main_channel)
+            except Exception:
+                channel_id = main_channel
+            post = await message.copy(chat_id=channel_id, caption=message.caption)
+            msg_id = post.id
+            source_channel_id = channel_id
+        else:
+            msg_id = f_msg_id
+
+        file_name = ""
+        if message.document:
+            file_name = message.document.file_name or ""
+        elif message.video:
+            file_name = message.video.file_name or ""
+        elif message.audio:
+            file_name = message.audio.file_name or ""
+        elif message.caption:
+            file_name = message.caption.split("\n")[0][:50]
+
+        # Algorithm based hash encoding
+        converted_id = msg_id * abs(source_channel_id)
+        base64_string = await encode(f"get-{converted_id}")
+        link = f"https://t.me/{client.username}?start={base64_string}"
         
         reply_markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"🔁 {sc('share url')}", url=f'https://telegram.me/share/url?url={link}')]])
         
-        text = ""
-        # Header Info
-        text += "<blockquote>"
+        text = "<blockquote>"
         if file_name:
             text += f"<b>📂 {file_name}</b>\n"
-        
         if client.auto_del > 0:
-            import humanize
             text += f"⏳ {sc('auto delete')}: {humanize.naturaldelta(client.auto_del)}"
-        
         if text == "<blockquote>":
             text = ""
         else:
             text += "</blockquote>\n\n"
 
         text += f"<b>{sc('here is your link')}</b>\n\n<code>{link}</code>"
-        
         await msg.edit_text(text, reply_markup=reply_markup)
         
     except Exception as e:
-        print(f"Error in single_file_gen: {e}")
         await message.reply(f"❌ {sc('error')}: {e}")
-
-

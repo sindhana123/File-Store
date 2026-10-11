@@ -105,27 +105,33 @@ async def get_message_id(client, message):
 
     if message.forward_from_chat:
         if message.forward_from_chat.id in all_db_ids:
-            return message.forward_from_message_id
+            return message.forward_from_message_id, message.forward_from_chat.id
         else:
-            return 0
+            return 0, 0
     elif message.forward_sender_name:
-        return 0
+        return 0, 0
     elif message.text:
         pattern = r"https://t.me/(?:c/)?(.*)/(\d+)"
-        matches = re.match(pattern,message.text)
+        matches = re.match(pattern, message.text)
         if not matches:
-            return 0
+            return 0, 0
         channel_id = matches.group(1)
         msg_id = int(matches.group(2))
         if channel_id.isdigit():
             numeric_id = int(f"-100{channel_id}")
             if numeric_id in all_db_ids:
-                return msg_id
+                return msg_id, numeric_id
         else:
             if primary_channel and channel_id == getattr(primary_channel, 'username', None):
-                return msg_id
-    else:
-        return 0
+                return msg_id, primary_db_id
+            for ch in all_db_ids:
+                try:
+                    chat = await client.get_chat(ch)
+                    if hasattr(chat, 'username') and chat.username == channel_id:
+                        return msg_id, ch
+                except Exception:
+                    continue
+    return 0, 0
 
 
 def get_readable_time(seconds: int) -> str:
