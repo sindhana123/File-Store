@@ -456,10 +456,10 @@ async def start_command(client: Client, message: Message):
 
     # ---------------- NORMAL /start UI ----------------
     buttons = [
-        [InlineKeyboardButton("⌜UPDATES⌟", url="https://t.me/Awakeners_bots"),
-         InlineKeyboardButton("⌜ɴᴇᴛᴡᴏʀᴋ⌟", url="https://t.me/The_Mortals")],
+        [InlineKeyboardButton("⌜UPDATES⌟", url="https://t.me/toonworld4all_Tamil"),
+         InlineKeyboardButton("⌜ɴᴇᴛᴡᴏʀᴋ⌟", url="https://t.me/toonworld4all_Tamil")],
         [InlineKeyboardButton("⌜ᴀʙᴏᴜᴛ⌟", callback_data="about"),
-         InlineKeyboardButton("⌜ᴅᴇᴠ⌟", url="https://t.me/GPGMS0")]
+         InlineKeyboardButton("⌜ᴅᴇᴠ⌟", url="https://t.me/toonworld4all_Tamil")]
     ]
     
     if user_id in client.admins:

@@ -1,7 +1,23 @@
-
 import os
 import asyncio
 import json
+
+# Monkey patch for pyromod Identifier error in Python 3.14
+try:
+    # Attempt to patch before Pyrogram loads it
+    from pyrogram.types.pyromod.identifier import Identifier
+    def _get_annotations(self):
+        # We need to bypass the property to get the class annotations smoothly
+        d = {}
+        for c in reversed(self.__class__.__mro__):
+            if '__annotations__' in c.__dict__:
+                ann = c.__dict__['__annotations__']
+                if not isinstance(ann, property):
+                    d.update(ann)
+        return d
+    Identifier.__annotations__ = property(_get_annotations)
+except Exception:
+    pass
 
 # Ensure event loop is set for Pyrogram's module-level get_event_loop() calls
 try:
