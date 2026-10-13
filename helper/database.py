@@ -566,10 +566,21 @@ class MongoDB:
 
     async def is_user_in_channel(self, channel_id: int, user_id: int) -> bool:
         """Check if a user previously sent a join request to channel_id (request=True channels)."""
-        doc = await self.bot_config.find_one({'_id': f'fsub_join_{channel_id}'})
-        if doc and 'users' in doc:
-            return user_id in doc['users']
-        return False
+        doc = await self.bot_config.find_one(
+            {'_id': f'fsub_join_{channel_id}', 'users': user_id},
+            {'_id': 1}
+        )
+        return doc is not None
+
+    async def is_fsub_auto_approve_enabled(self) -> bool:
+        """Check if join requests should be automatically approved."""
+        return await self.get_bot_config('fsub_auto_approve', False)
+
+    async def toggle_fsub_auto_approve(self) -> bool:
+        """Toggle auto-approval of join requests."""
+        current = await self.is_fsub_auto_approve_enabled()
+        await self.set_bot_config('fsub_auto_approve', not current)
+        return not current
 
     # ─────────────────────────────────────────────
     #  ForceSub Join Count Stats (all channels)
@@ -584,10 +595,9 @@ class MongoDB:
 
     async def get_channel_join_count(self, channel_id: int) -> int:
         """Return how many unique users were verified as joined via this bot (for stats panel)."""
-        # Count from both stat records (direct joins) and join-request records
         count = 0
         for key in [f'fsub_stat_{channel_id}', f'fsub_join_{channel_id}']:
-            doc = await self.bot_config.find_one({'_id': key})
+            doc = await self.bot_config.find_one({'_id': key}, {'users': 1})
             if doc and 'users' in doc:
                 count += len(doc['users'])
         return count

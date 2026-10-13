@@ -43,13 +43,20 @@ async def settings(client, query):
 @Client.on_callback_query(filters.regex("^fsub$"))
 async def fsub(client, query):
     header = f"<blockquote><b>⚡ {sc('force-sub channel list')}:</b></blockquote>\n\n"
+    auto_approve = await client.mongodb.is_fsub_auto_approve_enabled()
+    auto_approve_text = f"• **{sc('auto-approve requests')}**: `{'✅ Enabled (Auto-Accepts)' if auto_approve else '❌ Disabled (Keeps Pending)'}`\n\n"
+    header += auto_approve_text
     
     if not client.fsub_dict:
-        body = f"_{sc('no force-sub channels configured')}_"
+        body = f"_{sc('no force-sub channels configured')}_\n"
     else:
         body = ""
         for channel_id, info in client.fsub_dict.items():
             name = info[0] if info else sc("unknown")
+            is_req = info[2] if len(info) > 2 else False
+            timer = info[3] if len(info) > 3 else 0
+            type_str = "📩 Request-Mode" if is_req else "📢 Direct Join"
+            timer_str = f"⏱️ {timer}m" if timer > 0 else "♾️ Permanent"
             try:
                 join_count = await client.mongodb.get_channel_join_count(channel_id)
             except Exception:
@@ -57,26 +64,43 @@ async def fsub(client, query):
             body += (
                 f"<blockquote>"
                 f"<b>{sc('name')}:</b> {name}\n"
-                f"<b>({sc('id')}:</b> <code>{channel_id}</code>)\n"
+                f"<b>{sc('id')}:</b> <code>{channel_id}</code>\n"
+                f"<b>{sc('mode')}:</b> <code>{type_str}</code> | <code>{timer_str}</code>\n"
                 f"<b>{sc('joined via bot')}:</b> <code>{join_count}</code>"
                 f"</blockquote>\n"
             )
 
     msg = header + body
     reply_markup = InlineKeyboardMarkup([
-        [InlineKeyboardButton('ᴀᴅᴅ ᴄʜᴀɴɴᴇʟ', 'add_fsub'), InlineKeyboardButton('ʀᴇᴍᴏᴠᴇ ᴄʜᴀɴɴᴇʟ', 'rm_fsub')],
+        [InlineKeyboardButton('➕ ᴀᴅᴅ ᴄʜᴀɴɴᴇʟ', 'add_fsub'), InlineKeyboardButton('➖ ʀᴇᴍᴏᴠᴇ ᴄʜᴀɴɴᴇʟ', 'rm_fsub')],
+        [InlineKeyboardButton(f'⚡ ᴀᴜᴛᴏ-ᴀᴘᴘʀᴏᴠᴇ: {"✅ ᴏɴ" if auto_approve else "❌ ᴏꜰꜰ"}', 'toggle_auto_approve')],
         [InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'settings')]
     ])
     await query.message.edit_text(msg, reply_markup=reply_markup)
     return
+
+@Client.on_callback_query(filters.regex("^toggle_auto_approve$"))
+async def toggle_auto_approve_cb(client, query):
+    new_val = await client.mongodb.toggle_fsub_auto_approve()
+    status_str = "Enabled (Bot will auto-accept join requests)" if new_val else "Disabled (Requests will stay pending)"
+    await query.answer(f"Auto-Approve {status_str}", show_alert=True)
+    await fsub(client, query)
 
 @Client.on_callback_query(filters.regex("^add_fsub$"))
 async def add_fsub_cb(client, query):
     await query.answer()
     msg = f"""<blockquote><b>➕ {sc('add force-sub channel')}:</b></blockquote>
 
-{sc('forward a message from the channel or send the channel id')}
-{sc('make sure the bot is admin in that channel')}!
+{sc('send channel id with options or forward a message from the channel')}:
+<blockquote expandable><b>Format:</b>
+<code>&lt;channel_id&gt; [request: yes/no] [timer_in_minutes]</code>
+
+<b>Examples:</b>
+• <code>-1001234567890 yes 0</code> (Request-Mode, Permanent)
+• <code>-1001234567890 no 0</code> (Direct Join, Permanent)
+• <code>-1001234567890 yes 5</code> (Request-Mode, 5min Expiring Link)
+
+<i>Default if omitted: Direct Join, Permanent</i></blockquote>
 
 _{sc('timeout')}: 60s_
 """
@@ -84,6 +108,8 @@ _{sc('timeout')}: 60s_
     try:
         res = await client.listen(user_id=query.from_user.id, filters=filters.text | filters.forwarded, timeout=60)
         channel_id = None
+        request = False
+        timer = 0
         try:
             if hasattr(res, 'forward_origin') and res.forward_origin:
                 if res.forward_origin.type == "channel":
@@ -96,17 +122,17 @@ _{sc('timeout')}: 60s_
             try:
                 parts = res.text.strip().split()
                 channel_id = int(parts[0])
-                request = False
-                timer = 0
                 
                 if len(parts) >= 2:
-                    if parts[1].lower() in ('true', 'on', 'yes'):
+                    if parts[1].lower() in ('true', 'on', 'yes', 'y', '1', 'req', 'request'):
                         request = True
+                    elif parts[1].lower() in ('false', 'off', 'no', 'n', '0'):
+                        request = False
                         
                 if len(parts) >= 3:
                     if parts[2].isdigit():
                         timer = int(parts[2])
-            except:
+            except Exception:
                 pass
                 
         if not channel_id:
@@ -136,7 +162,7 @@ _{sc('timeout')}: 60s_
         client.fsub_dict[channel_id] = [name, invite_link, request, timer]
         await client.mongodb.save_fsub_channels(client.fsub_dict)  # 💾 Persist
         
-        req_status = "✅ Request-Mode" if request else "❌ Standard"
+        req_status = "✅ Request-Mode" if request else "❌ Direct Join"
         timer_status = f"⏱️ {timer}m" if timer > 0 else "♾️ Permanent"
         
         msg = f"**✅ {name}** `({channel_id})` {sc('added to force-sub')}!\n\n"
@@ -147,26 +173,46 @@ _{sc('timeout')}: 60s_
     except ListenerTimeout:
         await query.message.edit_text("**⌚ Timeout!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
 
-@Client.on_callback_query(filters.regex("^rm_fsub$"))
+@Client.on_callback_query(filters.regex(r"^rm_fsub(?:_(-?\d+))?$"))
 async def rm_fsub_cb(client, query):
     await query.answer()
     if not client.fsub_dict:
         return await query.answer(f"❌ {sc('no channels configured')}", show_alert=True)
+    
+    # Check if a channel id was directly passed in callback
+    match_id = query.matches[0].group(1) if query.matches else None
+    if match_id:
+        target_id = int(match_id)
+        if target_id in client.fsub_dict:
+            name = client.fsub_dict[target_id][0]
+            del client.fsub_dict[target_id]
+            await client.mongodb.save_fsub_channels(client.fsub_dict)
+            await query.answer(f"✅ Removed {name}!", show_alert=True)
+            return await fsub(client, query)
+
+    # Show inline remove buttons for each channel
+    buttons = []
+    for cid, info in client.fsub_dict.items():
+        cname = info[0] if info else str(cid)
+        buttons.append([InlineKeyboardButton(f"🗑️ {cname[:25]}", callback_data=f"rm_fsub_{cid}")])
+    buttons.append([InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')])
+
     channel_list = "\n".join(f"• <code>{cid}</code> — {info[0]}" for cid, info in client.fsub_dict.items())
     msg = f"""<blockquote><b>➖ {sc('remove force-sub channel')}:</b></blockquote>
+
+{sc('tap a channel button below to remove it, or send channel id')}!
 
 {sc('current channels')}:
 {channel_list}
 
-{sc('send the channel id to remove')}:
 _{sc('timeout')}: 60s_
 """
-    await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
+    await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(buttons))
     try:
         res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
         try:
             channel_id = int(res.text.strip())
-        except:
+        except Exception:
             return await query.message.edit_text("**❌ Invalid ID!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
         if channel_id not in client.fsub_dict:
             return await query.message.edit_text(f"**❌ Channel not in force-sub list!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
@@ -175,7 +221,7 @@ _{sc('timeout')}: 60s_
         await client.mongodb.save_fsub_channels(client.fsub_dict)  # 💾 Persist
         await query.message.edit_text(f"**✅ {name}** {sc('removed from force-sub')}!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
     except ListenerTimeout:
-        await query.message.edit_text("**⌚ Timeout!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
+        pass
 
 @Client.on_callback_query(filters.regex("^db_channels$"))
 async def db_channels(client, query):

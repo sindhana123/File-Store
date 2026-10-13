@@ -3,7 +3,7 @@ import re
 import asyncio
 import aiohttp
 from pyrogram import filters, Client
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import UserNotParticipant, Forbidden, PeerIdInvalid, ChatAdminRequired, FloodWait
 from datetime import datetime, timedelta
@@ -173,15 +173,18 @@ async def is_bot_admin(client, channel_id):
 
 async def check_subscription(client, user_id):
     """Check if a user is subscribed to all required channels/groups."""
-    from pyrogram.errors import ChatAdminRequired
     statuses = {}
 
-    for channel_id, (channel_name, channel_link, request, timer) in client.fsub_dict.items():
+    for channel_id, channel_info in client.fsub_dict.items():
+        channel_name = channel_info[0] if len(channel_info) > 0 else f"Channel {channel_id}"
+        request = channel_info[2] if len(channel_info) > 2 else False
+
         if request:
             send_req = await client.mongodb.is_user_in_channel(channel_id, user_id)
             if send_req:
                 statuses[channel_id] = ChatMemberStatus.MEMBER
                 continue
+
         try:
             user = await client.get_chat_member(channel_id, user_id)
             # LEFT / BANNED count as not joined. RESTRICTED is a member in groups.
@@ -189,18 +192,21 @@ async def check_subscription(client, user_id):
                 statuses[channel_id] = ChatMemberStatus.BANNED
             else:
                 statuses[channel_id] = user.status
+                # If they are already a member in a request-mode channel, record them so future checks are instant!
+                if request and user.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER, ChatMemberStatus.RESTRICTED):
+                    try:
+                        await client.mongodb.add_channel_user(channel_id, user_id)
+                    except Exception:
+                        pass
         except UserNotParticipant:
             statuses[channel_id] = ChatMemberStatus.BANNED
         except ChatAdminRequired:
-            # Bot is not admin in the group — can't check membership
-            # Treat as unknown-but-blocking so user must verify manually
             client.LOGGER(__name__, client.name).warning(
-                f"Bot needs admin rights to check membership in {channel_name}. "
-                f"Please make bot admin in the group."
+                f"Bot needs admin rights to check membership in {channel_name} ({channel_id})."
             )
             statuses[channel_id] = ChatMemberStatus.BANNED
         except Forbidden:
-            client.LOGGER(__name__, client.name).warning(f"Bot lacks permission for {channel_name}.")
+            client.LOGGER(__name__, client.name).warning(f"Bot lacks permission for {channel_name} ({channel_id}).")
             statuses[channel_id] = ChatMemberStatus.BANNED
         except Exception as e:
             client.LOGGER(__name__, client.name).warning(f"Error checking {channel_name}: {e}")
@@ -294,7 +300,8 @@ def force_sub(func):
             emoji = status_emojis.get(status, "❓")
             status_of_user = "Joined" if emoji in ('✅', '🛡️', '👑') else "Not Joined"
             c += 1
-            channels_message += f"{c}. {emoji} <code>{channel_name}</code> - __{status_of_user}__\n"
+            mode_tag = " [Request]" if request else ""
+            channels_message += f"{c}. {emoji} <code>{channel_name}</code>{mode_tag} - __{status_of_user}__\n"
 
             # If timer > 0, generate dynamic timed invite link
             if timer and timer > 0:
@@ -336,9 +343,10 @@ def force_sub(func):
 
             # Only add button for channels user has NOT joined
             if status not in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER, ChatMemberStatus.RESTRICTED}:
+                btn_name = f"📩 {channel_name}" if request else f"📢 {channel_name}"
                 if channel_link and isinstance(channel_link, str) and (channel_link.startswith("http://") or channel_link.startswith("https://") or channel_link.startswith("t.me/")):
                     valid_url = channel_link if channel_link.startswith("http") else f"https://{channel_link}"
-                    channel_buttons.append(InlineKeyboardButton(channel_name, url=valid_url))
+                    channel_buttons.append(InlineKeyboardButton(btn_name, url=valid_url))
                 else:
                     client.LOGGER(__name__, client.name).error(
                         f"Missing invite link for {channel_name} ({channel_id})! Bot must have 'Invite Users via Link' admin rights."
@@ -354,15 +362,20 @@ def force_sub(func):
         # Organize channel buttons in rows of 2
         keyboard = [channel_buttons[i:i + 2] for i in range(0, len(channel_buttons), 2)]
 
-        # Add "Try Again" button
+        # Add "Check Again" (instant callback) and "Try Again" (deep link)
         bot_username = getattr(client, 'username', None)
         from_link = message.text.split(" ") if message.text else []
-        if len(from_link) > 1 and bot_username:
-            try_again_link = f"https://t.me/{bot_username}/?start={from_link[1]}"
-            keyboard.append([InlineKeyboardButton("🔄 Try Again!", url=try_again_link)])
+        param = from_link[1] if len(from_link) > 1 else ""
+
+        check_cb = f"check_sub_{param}" if param else "check_sub"
+        action_row = [InlineKeyboardButton("🔄 Check Again", callback_data=check_cb)]
+
+        if param and bot_username:
+            action_row.append(InlineKeyboardButton("🔗 Try Again", url=f"https://t.me/{bot_username}/?start={param}"))
         elif bot_username:
-            try_again_link = f"https://t.me/{bot_username}?start"
-            keyboard.append([InlineKeyboardButton("🔄 Try Again!", url=try_again_link)])
+            action_row.append(InlineKeyboardButton("🔗 Try Again", url=f"https://t.me/{bot_username}?start"))
+
+        keyboard.append(action_row)
 
         buttons_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
@@ -384,6 +397,31 @@ def force_sub(func):
                 client.LOGGER(__name__, client.name).error(f"Fallback reply also failed: {e2}")
 
     return wrapper
+
+@Client.on_callback_query(filters.regex(r"^check_sub(?:_(.*))?$"))
+async def check_sub_cb(client: Client, query: CallbackQuery):
+    """Instant 1-tap re-verification callback handler for Force Sub."""
+    user_id = query.from_user.id
+    statuses = await check_subscription(client, user_id)
+
+    if is_user_subscribed(statuses):
+        await query.answer("✅ Verification successful! Unlocking...", show_alert=False)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        data = query.data.split("_", 2)
+        param = data[2] if len(data) > 2 and data[2] else ""
+
+        # Construct simulated message to deliver files / invoke start command seamlessly
+        from plugins.start import start_command
+        simulated_msg = query.message
+        simulated_msg.text = f"/start {param}".strip()
+        simulated_msg.from_user = query.from_user
+        return await start_command(client, simulated_msg)
+    else:
+        await query.answer("❌ You haven't joined/requested all channels yet! Please check the channels above.", show_alert=True)
 
 async def delete_files(messages, client, k, enter):
     auto_del = client.auto_del

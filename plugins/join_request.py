@@ -15,13 +15,22 @@ async def handle_join_request(client, join_request: ChatJoinRequest):
     
     channel = client.fsub_dict.get(channel_id, [])
     if channel:
-        # Track this join
+        # Track this join request so user can use the bot immediately
         await client.mongodb.add_channel_user(channel_id, user_id)
-        # Approve the join request so user actually joins
         try:
-            await client.approve_chat_join_request(channel_id, user_id)
+            await client.mongodb.record_stat_user(channel_id, user_id)
         except Exception:
             pass
+
+        # Only approve the join request if auto-approve is explicitly enabled
+        auto_approve = await client.mongodb.is_fsub_auto_approve_enabled()
+        if auto_approve:
+            try:
+                await client.approve_chat_join_request(channel_id, user_id)
+            except Exception as e:
+                client.LOGGER(__name__, client.name).warning(
+                    f"Failed to auto-approve join request for user {user_id} in {channel_id}: {e}"
+                )
 
 @Client.on_callback_query(filters.regex(r"^fsub_nlink_"))
 async def fsub_nlink_cb(client, query):
