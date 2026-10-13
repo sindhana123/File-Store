@@ -119,14 +119,16 @@ _{sc('timeout')}: 60s_
             chat = await client.get_chat(channel_id)
             name = chat.title
             
-            # For request type fsub, we set invite link to None (bot will generate it later with timer)
-            if request:
+            # If timer is set, link will be generated dynamically on the fly
+            if timer > 0:
                 invite_link = None
             else:
                 try:
-                    invite_link = chat.invite_link or (await client.create_chat_invite_link(channel_id)).invite_link
-                except:
-                    invite_link = None
+                    chat_link = await client.create_chat_invite_link(channel_id, creates_join_request=request)
+                    invite_link = chat_link.invite_link
+                except Exception as ex:
+                    client.LOGGER(__name__, client.name).warning(f"Error creating invite link: {ex}")
+                    invite_link = getattr(chat, 'invite_link', None) or (f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None)
                     
         except Exception as e:
             return await query.message.edit_text(f"**❌ Cannot access channel!**\n`{e}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))

@@ -191,6 +191,22 @@ class Bot(Client):
             if saved_fsub:
                 self.fsub_dict = saved_fsub
                 self.LOGGER(__name__, self.name).info(f"Loaded {len(saved_fsub)} fsub channels from DB.")
+                
+                # Self-heal missing permanent invite links
+                healed = False
+                for cid, info in list(self.fsub_dict.items()):
+                    if len(info) >= 4 and not info[1] and (not info[3] or info[3] <= 0):
+                        try:
+                            chat_link = await self.create_chat_invite_link(cid, creates_join_request=bool(info[2]))
+                            info[1] = chat_link.invite_link
+                            healed = True
+                        except Exception as ex:
+                            self.LOGGER(__name__, self.name).warning(f"Could not heal invite link for {cid}: {ex}")
+                if healed:
+                    try:
+                        await self.mongodb.save_fsub_channels(self.fsub_dict)
+                    except Exception:
+                        pass
         except Exception as e:
             self.LOGGER(__name__, self.name).warning(f"Failed to load fsub channels from DB: {e}")
         

@@ -226,10 +226,15 @@ def force_sub(func):
             return await func(client, message)
         photo = client.messages.get('FSUB_PHOTO', '')
         if photo:
-            msg = await message.reply_photo(
-                caption="<code>Checking subscription...</code>", 
-                photo=photo
-            )
+            try:
+                msg = await message.reply_photo(
+                    caption="<code>Checking subscription...</code>", 
+                    photo=photo
+                )
+            except Exception:
+                msg = await message.reply(
+                    "<code>Checking subscription...</code>"
+                )
         else:
             msg = await message.reply(
                 "<code>Checking subscription...</code>"
@@ -238,7 +243,10 @@ def force_sub(func):
         statuses = await check_subscription(client, user_id)
 
         if is_user_subscribed(statuses):
-            await msg.delete()
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             # 📊 Track join count for each channel the user is verified as a member of
             import asyncio
             async def _track_joins():
@@ -252,7 +260,7 @@ def force_sub(func):
             return await func(client, message)
 
         # User is not subscribed to all channels
-        buttons = []
+        channel_buttons = []
         fsub_template = client.messages.get('FSUB', '')
         try:
             fsub_text = fsub_template.format(
@@ -275,42 +283,111 @@ def force_sub(func):
             None: "⚠️"
         }
         c = 0
-        for channel_id, (channel_name, channel_link, request, timer) in client.fsub_dict.items():
+        needs_fsub_save = False
+        for channel_id, channel_info in client.fsub_dict.items():
+            channel_name = channel_info[0] if len(channel_info) > 0 else f"Channel {channel_id}"
+            channel_link = channel_info[1] if len(channel_info) > 1 else None
+            request = channel_info[2] if len(channel_info) > 2 else False
+            timer = channel_info[3] if len(channel_info) > 3 else 0
+
             status = statuses.get(channel_id, None)
             emoji = status_emojis.get(status, "❓")
             status_of_user = "Joined" if emoji in ('✅', '🛡️', '👑') else "Not Joined"
-            c = c+1
+            c += 1
             channels_message += f"{c}. {emoji} <code>{channel_name}</code> - __{status_of_user}__\n"
-            if timer > 0:
-                expire_time = datetime.now() + timedelta(minutes=timer)
-                invite = await client.create_chat_invite_link(
-                    chat_id=channel_id,
-                    expire_date=expire_time,
-                    creates_join_request=request
-                )
-                channel_link = invite.invite_link
-            if status not in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER, ChatMemberStatus.RESTRICTED}:
-                buttons.append(InlineKeyboardButton(channel_name, url=channel_link))
-        
-        # Add "Try Again" button if needed
-        from_link = message.text.split(" ")
-        if len(from_link) > 1:
-            try_again_link = f"https://t.me/{client.username}/?start={from_link[1]}"
-            buttons.append(InlineKeyboardButton("🔄 Try Again!", url=try_again_link))
 
-        # Organize buttons in rows of 2
-        buttons_markup = InlineKeyboardMarkup([buttons[i:i + 2] for i in range(0, len(buttons), 2)])
-        buttons_markup = None if not buttons else buttons_markup
-        # Edit message with status update and buttons
+            # If timer > 0, generate dynamic timed invite link
+            if timer and timer > 0:
+                try:
+                    expire_time = datetime.now() + timedelta(minutes=timer)
+                    invite = await client.create_chat_invite_link(
+                        chat_id=channel_id,
+                        expire_date=expire_time,
+                        creates_join_request=bool(request)
+                    )
+                    channel_link = invite.invite_link
+                except Exception as e:
+                    client.LOGGER(__name__, client.name).warning(
+                        f"Failed to create timed invite link for {channel_name} ({channel_id}): {e}"
+                    )
+
+            # If permanent link is missing, generate one
+            if not channel_link:
+                try:
+                    chat_link = await client.create_chat_invite_link(
+                        chat_id=channel_id,
+                        creates_join_request=bool(request)
+                    )
+                    channel_link = chat_link.invite_link
+                    if not timer or timer <= 0:
+                        client.fsub_dict[channel_id][1] = channel_link
+                        needs_fsub_save = True
+                except Exception as e:
+                    client.LOGGER(__name__, client.name).warning(
+                        f"Failed to create permanent invite link for {channel_name} ({channel_id}): {e}"
+                    )
+                    try:
+                        chat = await client.get_chat(channel_id)
+                        channel_link = getattr(chat, 'invite_link', None) or (
+                            f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None
+                        )
+                    except Exception:
+                        channel_link = None
+
+            # Only add button for channels user has NOT joined
+            if status not in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER, ChatMemberStatus.RESTRICTED}:
+                if channel_link and isinstance(channel_link, str) and (channel_link.startswith("http://") or channel_link.startswith("https://") or channel_link.startswith("t.me/")):
+                    valid_url = channel_link if channel_link.startswith("http") else f"https://{channel_link}"
+                    channel_buttons.append(InlineKeyboardButton(channel_name, url=valid_url))
+                else:
+                    client.LOGGER(__name__, client.name).error(
+                        f"Missing invite link for {channel_name} ({channel_id})! Bot must have 'Invite Users via Link' admin rights."
+                    )
+                    channel_buttons.append(InlineKeyboardButton(f"⚠️ {channel_name}", callback_data=f"fsub_nlink_{channel_id}"))
+
+        if needs_fsub_save:
+            try:
+                await client.mongodb.save_fsub_channels(client.fsub_dict)
+            except Exception:
+                pass
+
+        # Organize channel buttons in rows of 2
+        keyboard = [channel_buttons[i:i + 2] for i in range(0, len(channel_buttons), 2)]
+
+        # Add "Try Again" button
+        bot_username = getattr(client, 'username', None)
+        from_link = message.text.split(" ") if message.text else []
+        if len(from_link) > 1 and bot_username:
+            try_again_link = f"https://t.me/{bot_username}/?start={from_link[1]}"
+            keyboard.append([InlineKeyboardButton("🔄 Try Again!", url=try_again_link)])
+        elif bot_username:
+            try_again_link = f"https://t.me/{bot_username}?start"
+            keyboard.append([InlineKeyboardButton("🔄 Try Again!", url=try_again_link)])
+
+        buttons_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+
+        # Edit message with status update and buttons (safely with fallback)
         try:
-            await msg.edit_text(text=channels_message, reply_markup=buttons_markup)
+            if getattr(msg, 'photo', None):
+                await msg.edit_caption(caption=channels_message, reply_markup=buttons_markup)
+            else:
+                await msg.edit_text(text=channels_message, reply_markup=buttons_markup)
         except Exception as e:
-            client.LOGGER(__name__, client.name).warning(f"Error updating message: {e}")
+            client.LOGGER(__name__, client.name).warning(f"Error updating message: {e}. Attempting fallback reply.")
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            try:
+                await message.reply(text=channels_message, reply_markup=buttons_markup)
+            except Exception as e2:
+                client.LOGGER(__name__, client.name).error(f"Fallback reply also failed: {e2}")
 
     return wrapper
 
 async def delete_files(messages, client, k, enter):
     auto_del = client.auto_del
+    keyboard = None
     if auto_del > 0:
         await asyncio.sleep(auto_del)
 
@@ -323,10 +400,9 @@ async def delete_files(messages, client, k, enter):
             else:
                 client.LOGGER(__name__, client.name).warning("Encountered an empty or deleted message.")
         
-        command = enter.split(" ")
+        command = enter.split(" ") if enter else []
         command_part = command[1] if len(command) > 1 else None
         
-        keyboard = None
         if command_part:
             url = f"https://t.me/{client.username}?start={command_part}"
             keyboard = InlineKeyboardMarkup([
