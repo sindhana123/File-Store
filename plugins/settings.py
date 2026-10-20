@@ -1,9 +1,12 @@
 # Made by @Awakeners_Bots
 # GitHub: https://github.com/Awakener_Bots
 
+import asyncio
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors.pyromod import ListenerTimeout
+from pyrogram.errors import PeerIdInvalid, ChannelInvalid
 from config import OWNER_ID, URL_SHORTENERS
 import humanize
 from helper.font_converter import to_small_caps as sc
@@ -105,47 +108,95 @@ async def add_fsub_cb(client, query):
 _{sc('timeout')}: 60s_
 """
     await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
+    back_markup = InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]])
     try:
-        res = await client.listen(user_id=query.from_user.id, filters=filters.text | filters.forwarded, timeout=60)
-        channel_id = None
-        request = False
-        timer = 0
-        try:
-            if hasattr(res, 'forward_origin') and res.forward_origin:
-                if res.forward_origin.type == "channel":
-                    channel_id = res.forward_origin.chat.id
-            elif hasattr(res, 'forward_from_chat') and res.forward_from_chat:
-                channel_id = res.forward_from_chat.id
-        except Exception:
-            pass
-        if not channel_id and res.text:
-            try:
+        while True:
+            res = await client.listen(user_id=query.from_user.id, filters=filters.text | filters.forwarded, timeout=60)
+            channel_ref = None
+            request = False
+            timer = 0
+
+            # Telegram changed forwarded-message metadata in newer Bot API versions.
+            origin = getattr(res, 'forward_origin', None)
+            if origin and getattr(origin, 'type', None) == 'channel':
+                channel_ref = getattr(getattr(origin, 'chat', None), 'id', None)
+            if not channel_ref:
+                forwarded_chat = getattr(res, 'forward_from_chat', None)
+                if forwarded_chat:
+                    channel_ref = forwarded_chat.id
+
+            if res.text:
                 parts = res.text.strip().split()
-                channel_id = int(parts[0])
-                
+                if parts and parts[0] == '0':
+                    return await query.message.edit_text("Add channel cancelled.", reply_markup=back_markup)
+                if not channel_ref and parts:
+                    channel_ref = parts[0]
+                if len(parts) > 3:
+                    await query.message.edit_text(
+                        "❌ Invalid format. Send `<channel_id> [yes/no] [timer_minutes]` (or send `0` to cancel).",
+                        reply_markup=back_markup,
+                    )
+                    continue
                 if len(parts) >= 2:
-                    if parts[1].lower() in ('true', 'on', 'yes', 'y', '1', 'req', 'request'):
+                    mode = parts[1].lower()
+                    if mode in ('true', 'on', 'yes', 'y', '1', 'req', 'request'):
                         request = True
-                    elif parts[1].lower() in ('false', 'off', 'no', 'n', '0'):
-                        request = False
-                        
+                    elif mode not in ('false', 'off', 'no', 'n', '0'):
+                        await query.message.edit_text("❌ Mode must be `yes` or `no`. Send the channel details again.", reply_markup=back_markup)
+                        continue
                 if len(parts) >= 3:
-                    if parts[2].isdigit():
+                    try:
                         timer = int(parts[2])
-            except Exception:
-                pass
-                
-        if not channel_id:
-            return await query.message.edit_text("**❌ Invalid Channel ID!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
-            
-        if channel_id in client.fsub_dict:
-            return await query.message.edit_text(f"**⚠️ Already in force-sub list!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
-            
-        try:
-            chat = await client.get_chat(channel_id)
-            name = chat.title
-            
-            # If timer is set, link will be generated dynamically on the fly
+                        if timer < 0:
+                            raise ValueError
+                    except ValueError:
+                        await query.message.edit_text("❌ Timer must be a non-negative number of minutes. Send the channel details again.", reply_markup=back_markup)
+                        continue
+
+            if channel_ref is None:
+                await query.message.edit_text("❌ I couldn't read a channel from that message. Send its numeric ID or forward a channel post.", reply_markup=back_markup)
+                continue
+            try:
+                # Normalize numeric IDs, while still allowing @usernames and t.me links.
+                channel_ref = int(channel_ref)
+            except (TypeError, ValueError):
+                channel_ref = str(channel_ref).strip()
+                if channel_ref.startswith('https://t.me/'):
+                    channel_ref = channel_ref.removeprefix('https://t.me/').split('/')[0]
+                if channel_ref.startswith('t.me/'):
+                    channel_ref = channel_ref.removeprefix('t.me/').split('/')[0]
+                if channel_ref and not channel_ref.startswith('@') and not channel_ref.startswith('-'):
+                    channel_ref = '@' + channel_ref
+                if not channel_ref:
+                    await query.message.edit_text("❌ Invalid channel ID or username. Send the channel details again.", reply_markup=back_markup)
+                    continue
+
+            # A failed first lookup can be a transient Telegram peer-cache issue.
+            chat = None
+            last_error = None
+            for attempt in range(3):
+                try:
+                    chat = await client.get_chat(channel_ref)
+                    break
+                except (PeerIdInvalid, ChannelInvalid) as e:
+                    last_error = e
+                    if attempt < 2:
+                        await asyncio.sleep(0.7 * (attempt + 1))
+                except Exception as e:
+                    last_error = e
+                    break
+            if not chat:
+                await query.message.edit_text(
+                    f"❌ I couldn't access `{channel_ref}`. Check the ID/username, add this bot as a channel admin, then send it again.\n\n`{last_error}`",
+                    reply_markup=back_markup,
+                )
+                continue
+
+            channel_id = chat.id
+            if channel_id in client.fsub_dict:
+                await query.message.edit_text("⚠️ This channel is already in the force-sub list. Send another channel or `0` to cancel.", reply_markup=back_markup)
+                continue
+            name = chat.title or getattr(chat, 'username', None) or str(channel_id)
             if timer > 0:
                 invite_link = None
             else:
@@ -155,23 +206,28 @@ _{sc('timeout')}: 60s_
                 except Exception as ex:
                     client.LOGGER(__name__, client.name).warning(f"Error creating invite link: {ex}")
                     invite_link = getattr(chat, 'invite_link', None) or (f"https://t.me/{chat.username}" if getattr(chat, 'username', None) else None)
-                    
-        except Exception as e:
-            return await query.message.edit_text(f"**❌ Cannot access channel!**\n`{e}`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
-            
-        client.fsub_dict[channel_id] = [name, invite_link, request, timer]
-        await client.mongodb.save_fsub_channels(client.fsub_dict)  # 💾 Persist
-        
-        req_status = "✅ Request-Mode" if request else "❌ Direct Join"
-        timer_status = f"⏱️ {timer}m" if timer > 0 else "♾️ Permanent"
-        
-        msg = f"**✅ {name}** `({channel_id})` {sc('added to force-sub')}!\n\n"
-        msg += f"• **Type:** `{req_status}`\n"
-        msg += f"• **Timer:** `{timer_status}`"
-        
-        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
+                    if not invite_link:
+                        await query.message.edit_text(
+                            f"❌ I can read **{name}**, but can't create a join link. Promote the bot to admin with invite-link permission, then send the channel again.\n\n`{ex}`",
+                            reply_markup=back_markup,
+                        )
+                        continue
+
+            client.fsub_dict[channel_id] = [name, invite_link, request, timer]
+            try:
+                await client.mongodb.save_fsub_channels(client.fsub_dict)
+            except Exception as e:
+                client.fsub_dict.pop(channel_id, None)
+                client.LOGGER(__name__, client.name).exception(f"Failed to save force-sub channel {channel_id}: {e}")
+                await query.message.edit_text("❌ Channel was not saved. Database error; please try again.", reply_markup=back_markup)
+                continue
+
+            req_status = "✅ Request-Mode" if request else "❌ Direct Join"
+            timer_status = f"⏱️ {timer}m" if timer > 0 else "♾️ Permanent"
+            msg = f"**✅ {name}** `({channel_id})` {sc('added to force-sub')}!\n\n• **Type:** `{req_status}`\n• **Timer:** `{timer_status}`"
+            return await query.message.edit_text(msg, reply_markup=back_markup)
     except ListenerTimeout:
-        await query.message.edit_text("**⌚ Timeout!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'fsub')]]))
+        await query.message.edit_text("**⌚ Timeout!**", reply_markup=back_markup)
 
 @Client.on_callback_query(filters.regex(r"^rm_fsub(?:_(-?\d+))?$"))
 async def rm_fsub_cb(client, query):
