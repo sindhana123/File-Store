@@ -3,7 +3,7 @@
 
 import asyncio
 import re
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -44,6 +44,61 @@ async def settings(client, query):
     ])
     await query.message.edit_text(msg, reply_markup=reply_markup)
     return
+
+
+@Client.on_message(filters.command("settings") & filters.private)
+async def settings_command(client, message):
+    if message.from_user.id not in client.admins:
+        return await message.reply("❌ Admins only.")
+    panel_message = await message.reply("Loading settings...")
+
+    class MessageQuery:
+        def __init__(self, msg, user):
+            self.message = msg
+            self.from_user = user
+
+    await settings(client, MessageQuery(panel_message, message.from_user))
+
+
+@Client.on_message(filters.command("cc") & filters.private)
+async def command_centre(client, message):
+    commands = [
+        "<b>📚 Bot Commands</b>",
+        "<code>/cc</code> — Show this command guide",
+        "<code>/start &lt;link_code&gt;</code> — Open a shared file or batch link",
+        "<code>/premium</code> — View premium plans",
+        "<code>/checkpremium</code> — Check your premium status (admins may add a user ID)",
+        "<code>/mypremium</code> — View your premium expiry",
+        "<code>/credits</code> — Check your credits and transactions",
+        "<code>/buycredits</code> — View credit packages",
+        "<code>/referral</code> — Get your referral link",
+    ]
+    if message.from_user.id in client.admins:
+        commands.extend([
+            "", "<b>🛠 Admin Commands</b>",
+            "<code>/settings</code> — Open the full settings panel",
+            "<code>/fsub</code> or <code>/forcesub</code> — Open force-sub settings",
+            "<code>/genlink</code> — Reply to a file or send a DB post link to create a file link",
+            "<code>/batch</code> — Create a link for a DB message range",
+            "<code>/nbatch &lt;count&gt;</code> — Create a batch link starting from a DB post",
+            "<code>/bulk</code> — Generate links for files in a DB post range",
+            "<code>/autobatch</code> — Start manual auto-batch creation",
+            "<code>/cancelbatch</code> — Cancel the active batch process",
+            "<code>/addpremium &lt;user_id&gt; [days]</code> — Grant premium; omit days for lifetime",
+            "<code>/removepremium &lt;user_id&gt;</code> — Remove a user's premium",
+            "<code>/premiumusers</code> — List premium users",
+            "<code>/addcredit &lt;user_id&gt; &lt;amount&gt; [days]</code> — Add credits",
+            "<code>/setcredit &lt;user_id&gt; &lt;amount&gt; [days]</code> — Set a credit balance",
+            "<code>/removecredit &lt;user_id&gt;</code> — Clear a user's credits",
+            "<code>/listcredits</code> — List users with credits",
+            "<code>/creditstats</code> — View credit system totals",
+            "<code>/approvepayment &lt;payment_id&gt;</code> — Approve a manual credit payment",
+            "<code>/broadcast</code> — Reply to a message to broadcast it; supports <code>--action pin</code> and <code>--ttl 1d</code>",
+            "<code>/users</code> — Show total users",
+            "<code>/ban &lt;user_id...&gt;</code> / <code>/unban &lt;user_id...&gt;</code> — Ban or unban users",
+            "<code>/usage</code> — Show server resource usage",
+        ])
+    await message.reply("\n".join(commands), disable_web_page_preview=True)
 
 @Client.on_callback_query(filters.regex("^fsub$"))
 async def fsub(client, query):
@@ -804,6 +859,46 @@ def _provider_key(api_url):
     return key.removeprefix('www_') or 'shortener'
 
 
+def _parse_shortener_input(raw):
+    """Accept the short URL|token form and the previous multi-field form."""
+    raw = raw.strip()
+    parts = [part.strip() for part in raw.split('|')]
+    api_token = ''
+    format_type = 'text'
+    if len(parts) == 2:
+        api_url, api_token = parts
+    elif len(parts) == 3:
+        # Older compact form: provider name|API URL|API token.
+        api_url, api_token = parts[1], parts[2]
+    elif len(parts) >= 4:
+        # Previous settings form: key|name|API URL|token|format.
+        api_url, api_token = parts[-3], parts[-2]
+        if parts[-1].lower() in ('text', 'json'):
+            format_type = parts[-1].lower()
+    elif '\n' in raw:
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if len(lines) != 2:
+            raise ValueError("Send the API URL and token on separate lines, or use API_URL|API_TOKEN.")
+        api_url, api_token = lines
+    else:
+        api_url = raw
+
+    parsed_url = urlparse(api_url)
+    if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc:
+        raise ValueError("API URL must start with http:// or https://.")
+    query = dict(parse_qsl(parsed_url.query, keep_blank_values=True))
+    api_token = api_token or query.get('api', '')
+    format_type = query.get('format', format_type) or format_type
+    extra_params = {
+        key: value for key, value in query.items()
+        if key.lower() not in ('api', 'url', 'format')
+    }
+    clean_url = urlunparse(parsed_url._replace(query='', fragment=''))
+    if not api_token:
+        raise ValueError("API token is missing. Use API_URL|API_TOKEN or include api=TOKEN in the API URL.")
+    return clean_url, api_token, format_type, extra_params
+
+
 @Client.on_callback_query(filters.regex("^add_shortener$"))
 async def add_shortener(client, query):
     msg = f"""<blockquote>**Add New URL Shortener Provider:**</blockquote>
@@ -812,23 +907,24 @@ Send the provider API URL and API token separated by `|`:
 `API_URL|API_TOKEN`
 
 Example: `https://vplink.in/api|YOUR_API_TOKEN`
-The provider name is detected from the URL. The API endpoint should accept `api` and `url` parameters.
+The old `key|name|API_URL|API_TOKEN|text/json` format and API URLs containing `api=TOKEN` are also accepted.
 
 __Send the details or wait for 60 second timeout to be completed!__
 """
     await query.answer()
     await query.message.edit_text(msg)
     try:
-        res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
-        details = res.text.strip().split('|', 1)
-        
-        if len(details) != 2:
-            return await query.message.edit_text("❌ Use this format: `API_URL|API_TOKEN`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
-        
-        api_url, api_token = [part.strip() for part in details]
+        while True:
+            res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
+            try:
+                api_url, api_token, format_type, extra_params = _parse_shortener_input(res.text or '')
+                break
+            except ValueError as e:
+                await query.message.edit_text(
+                    f"❌ {e}\n\nSend `API_URL|API_TOKEN`, the previous `key|name|API_URL|TOKEN|format` format, or paste an API URL containing `api=TOKEN`.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]),
+                )
         parsed_url = urlparse(api_url)
-        if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc or not api_token:
-            return await query.message.edit_text("❌ API URL or API token is invalid. Send `API_URL|API_TOKEN` again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         hostname = parsed_url.hostname.removeprefix('www.').lower()
         key = next((
             existing_key for existing_key, provider in client.url_shorteners.items()
@@ -846,6 +942,8 @@ __Send the details or wait for 60 second timeout to be completed!__
             'name': name,
             'api_url': api_url,
             'api_token': api_token,
+            'format': format_type,
+            'extra_params': extra_params,
             'active': True
         }
         try:
@@ -896,31 +994,21 @@ async def edit_shortener(client, query):
 • Token: `{provider.get('api_token', 'Not set')[:15]}...`
 • Active: `{"Yes" if provider.get('active', False) else "No"}`
 
-__Send new details in format:__
-```
-API_URL|API_TOKEN
-```
-
-Leave the API URL and token as-is if you don't want to change the provider.
+Send the API URL and token as `API_URL|API_TOKEN` (the previous multi-field format also works).
 """
         await query.message.edit_text(msg)
         try:
             res2 = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
-            details = res2.text.strip().split('|', 1)
-            
-            if len(details) != 2:
-                return await query.message.edit_text("❌ Use this format: `API_URL|API_TOKEN`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
-            
-            api_url, api_token = [part.strip() for part in details]
+            api_url, api_token, format_type, extra_params = _parse_shortener_input(res2.text or '')
             parsed_url = urlparse(api_url)
-            if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc or not api_token:
-                return await query.message.edit_text("❌ API URL or API token is invalid.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
             
             old_provider = dict(provider)
             client.url_shorteners[provider_key] = {
                 'name': parsed_url.hostname.removeprefix('www.'),
                 'api_url': api_url,
                 'api_token': api_token,
+                'format': format_type,
+                'extra_params': extra_params,
                 'active': provider.get('active', True)
             }
             try:

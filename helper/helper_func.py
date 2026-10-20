@@ -30,6 +30,7 @@ async def shorten_url(long_url: str, client=None) -> str:
                 'url': long_url,
                 'format': format_param
             }
+            params.update(provider_config.get('extra_params', {}))
             
             async with aiohttp.ClientSession() as session:
                 async with session.get(api_url, params=params, timeout=10) as response:
