@@ -364,7 +364,7 @@ async def start_command(client: Client, message: Message):
             await client.mongodb.create_access_token(user_id, original_base64, access_token)
             
             file_link = f"https://t.me/{client.username}?start={original_base64}_{access_token}"
-            shortened_url = await shorten_url(file_link)
+            shortened_url = await shorten_url(file_link, client)
             
             await temp_msg.delete()
             

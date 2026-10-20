@@ -11,7 +11,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import PeerIdInvalid, ChannelInvalid, RPCError
 import sys
 from datetime import datetime
-from config import LOGGER, PORT, OWNER_ID
+from config import LOGGER, PORT, OWNER_ID, URL_SHORTENERS
 from helper import MongoDB
 from helper.enhanced_credit_db import EnhancedCreditDB
 
@@ -36,6 +36,7 @@ class Bot(Client):
         self.fsub = fsub
         self.owner = OWNER_ID
         self.fsub_dict = {}
+        self.url_shorteners = {key: dict(value) for key, value in URL_SHORTENERS.items()}
         self.admins = admins + [OWNER_ID] if OWNER_ID not in admins else admins
         self.messages = messages
         self.auto_del = auto_del
@@ -175,6 +176,12 @@ class Bot(Client):
             self.LOGGER(__name__, self.name).info("Token indexes ensured.")
         except Exception as e:
             self.LOGGER(__name__, self.name).warning(f"Failed to create token indexes: {e}")
+
+        try:
+            self.url_shorteners = await self.mongodb.load_url_shorteners(self.url_shorteners)
+            self.LOGGER(__name__, self.name).info(f"Loaded {len(self.url_shorteners)} URL shortener providers from DB.")
+        except Exception as e:
+            self.LOGGER(__name__, self.name).warning(f"Failed to load URL shortener providers: {e}")
             
         # 🔄 Load Dynamic Configs (Auto-Del, ForceSub, Admins)
         try:

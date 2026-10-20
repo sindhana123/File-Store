@@ -2,12 +2,14 @@
 # GitHub: https://github.com/Awakener_Bots
 
 import asyncio
+import re
+from urllib.parse import urlparse
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors.pyromod import ListenerTimeout
 from pyrogram.errors import PeerIdInvalid, ChannelInvalid
-from config import OWNER_ID, URL_SHORTENERS
+from config import OWNER_ID
 import humanize
 from helper.font_converter import to_small_caps as sc
 
@@ -657,9 +659,10 @@ async def protect(client, query):
 
 @Client.on_callback_query(filters.regex("^url_shorteners$"))
 async def url_shorteners(client, query):
+    providers = client.url_shorteners
     msg = f"""<blockquote>**URL Shortener Settings:**</blockquote>
-**Configured Providers:** `{len(URL_SHORTENERS)}`
-**Active Providers:** `{len([k for k, v in URL_SHORTENERS.items() if v.get('active', False)])}`
+**Configured Providers:** `{len(providers)}`
+**Active Providers:** `{len([k for k, v in providers.items() if v.get('active', False)])}`
 
 """
     # Global System Status
@@ -667,7 +670,7 @@ async def url_shorteners(client, query):
     system_status = "✅ Enabled" if token_verification_enabled else "❌ Disabled"
     msg += f"**Global Verification System:** {system_status}\n\n"
 
-    for key, provider in URL_SHORTENERS.items():
+    for key, provider in providers.items():
         status = "✅ Active" if provider.get('active', False) else "❌ Inactive"
         msg += f"**{provider['name']}:** {status}\n"
         msg += f"  • API URL: `{provider['api_url']}`\n"
@@ -791,23 +794,25 @@ __Enter new link of fsub image or send the photo, or wait for 60 second timeout 
 
 
 # URL Shortener Management Callbacks
+async def _save_shortener_providers(client):
+    await client.mongodb.save_url_shorteners(client.url_shorteners)
+
+
+def _provider_key(api_url):
+    hostname = urlparse(api_url).hostname or 'shortener'
+    key = re.sub(r'[^a-z0-9]+', '_', hostname.lower()).strip('_')
+    return key.removeprefix('www_') or 'shortener'
+
+
 @Client.on_callback_query(filters.regex("^add_shortener$"))
 async def add_shortener(client, query):
     msg = f"""<blockquote>**Add New URL Shortener Provider:**</blockquote>
 
-__Send the provider details in this format:__
-```
-provider_key|Provider Name|API URL|API Token|Format
-```
+Send the provider API URL and API token separated by `|`:
+`API_URL|API_TOKEN`
 
-**Example:**
-```
-bitly|Bitly|https://api-ssl.bitly.com/v4/shorten|YOUR_TOKEN|json
-```
-
-**Supported Formats:**
-• `text` - Returns plain text URL
-• `json` - Returns JSON response
+Example: `https://vplink.in/api|YOUR_API_TOKEN`
+The provider name is detected from the URL. The API endpoint should accept `api` and `url` parameters.
 
 __Send the details or wait for 60 second timeout to be completed!__
 """
@@ -815,25 +820,44 @@ __Send the details or wait for 60 second timeout to be completed!__
     await query.message.edit_text(msg)
     try:
         res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
-        details = res.text.strip().split('|')
+        details = res.text.strip().split('|', 1)
         
-        if len(details) != 5:
-            return await query.message.edit_text("**Invalid format! Please use: provider_key|Name|API_URL|Token|Format**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+        if len(details) != 2:
+            return await query.message.edit_text("❌ Use this format: `API_URL|API_TOKEN`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
-        provider_key, name, api_url, api_token, format_type = details
-        
-        if provider_key in URL_SHORTENERS:
-            return await query.message.edit_text(f"**Provider '{provider_key}' already exists!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
-        
-        URL_SHORTENERS[provider_key] = {
+        api_url, api_token = [part.strip() for part in details]
+        parsed_url = urlparse(api_url)
+        if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc or not api_token:
+            return await query.message.edit_text("❌ API URL or API token is invalid. Send `API_URL|API_TOKEN` again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+        hostname = parsed_url.hostname.removeprefix('www.').lower()
+        key = next((
+            existing_key for existing_key, provider in client.url_shorteners.items()
+            if (urlparse(provider.get('api_url', '')).hostname or '').removeprefix('www.').lower() == hostname
+        ), _provider_key(api_url))
+        if key in client.url_shorteners and (urlparse(client.url_shorteners[key].get('api_url', '')).hostname or '').removeprefix('www.').lower() != hostname:
+            base_key = key
+            suffix = 2
+            while key in client.url_shorteners:
+                key = f'{base_key}_{suffix}'
+                suffix += 1
+        name = parsed_url.hostname.removeprefix('www.')
+        previous_provider = client.url_shorteners.get(key)
+        client.url_shorteners[key] = {
             'name': name,
             'api_url': api_url,
             'api_token': api_token,
-            'format': format_type,
             'active': True
         }
-        
-        return await query.message.edit_text(f"**✅ Provider '{name}' added successfully!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+        try:
+            await _save_shortener_providers(client)
+        except Exception as e:
+            if previous_provider is None:
+                client.url_shorteners.pop(key, None)
+            else:
+                client.url_shorteners[key] = previous_provider
+            client.LOGGER(__name__, client.name).exception(f"Failed to save URL shorteners: {e}")
+            return await query.message.edit_text("❌ Could not save provider to database. Please try again.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+        return await query.message.edit_text(f"✅ **{name}** provider added and saved permanently.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
     except ListenerTimeout:
         return await query.message.edit_text("**Timeout, try again!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
@@ -841,14 +865,14 @@ __Send the details or wait for 60 second timeout to be completed!__
 
 @Client.on_callback_query(filters.regex("^edit_shortener$"))
 async def edit_shortener(client, query):
-    if not URL_SHORTENERS:
+    if not client.url_shorteners:
         return await query.answer("No providers configured!")
     
     msg = f"""<blockquote>**Edit URL Shortener Provider:**</blockquote>
 
 **Available Providers:**
 """
-    for key, provider in URL_SHORTENERS.items():
+    for key, provider in client.url_shorteners.items():
         status = "✅" if provider.get('active', False) else "❌"
         msg += f"{status} `{key}` - {provider['name']}\n"
     
@@ -860,48 +884,53 @@ async def edit_shortener(client, query):
         res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
         provider_key = res.text.strip()
         
-        if provider_key not in URL_SHORTENERS:
+        if provider_key not in client.url_shorteners:
             return await query.message.edit_text(f"**Provider '{provider_key}' not found!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
-        provider = URL_SHORTENERS[provider_key]
+        provider = client.url_shorteners[provider_key]
         msg = f"""<blockquote>**Edit Provider: {provider['name']}**</blockquote>
 
 **Current Settings:**
 • Name: `{provider['name']}`
 • API URL: `{provider['api_url']}`
 • Token: `{provider.get('api_token', 'Not set')[:15]}...`
-• Format: `{provider.get('format', 'text')}`
 • Active: `{"Yes" if provider.get('active', False) else "No"}`
 
 __Send new details in format:__
 ```
-Name|API URL|API Token|Format|Active(1/0)
+API_URL|API_TOKEN
 ```
 
-**Example:**
-```
-Bitly Updated|https://api.bitly.com/v4/shorten|NEW_TOKEN|json|1
-```
+Leave the API URL and token as-is if you don't want to change the provider.
 """
         await query.message.edit_text(msg)
         try:
             res2 = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
-            details = res2.text.strip().split('|')
+            details = res2.text.strip().split('|', 1)
             
-            if len(details) != 5:
-                return await query.message.edit_text("**Invalid format! Use: Name|API_URL|Token|Format|Active(1/0)**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+            if len(details) != 2:
+                return await query.message.edit_text("❌ Use this format: `API_URL|API_TOKEN`", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
             
-            name, api_url, api_token, format_type, active = details
+            api_url, api_token = [part.strip() for part in details]
+            parsed_url = urlparse(api_url)
+            if parsed_url.scheme not in ('http', 'https') or not parsed_url.netloc or not api_token:
+                return await query.message.edit_text("❌ API URL or API token is invalid.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
             
-            URL_SHORTENERS[provider_key] = {
-                'name': name,
+            old_provider = dict(provider)
+            client.url_shorteners[provider_key] = {
+                'name': parsed_url.hostname.removeprefix('www.'),
                 'api_url': api_url,
                 'api_token': api_token,
-                'format': format_type,
-                'active': active == '1'
+                'active': provider.get('active', True)
             }
+            try:
+                await _save_shortener_providers(client)
+            except Exception as e:
+                client.url_shorteners[provider_key] = old_provider
+                client.LOGGER(__name__, client.name).exception(f"Failed to save URL shorteners: {e}")
+                return await query.message.edit_text("❌ Could not save provider changes to database.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
             
-            return await query.message.edit_text(f"**✅ Provider '{name}' updated successfully!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
+            return await query.message.edit_text(f"✅ **{client.url_shorteners[provider_key]['name']}** provider updated and saved.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
             
         except ListenerTimeout:
             return await query.message.edit_text("**Timeout, try again!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
@@ -912,14 +941,14 @@ Bitly Updated|https://api.bitly.com/v4/shorten|NEW_TOKEN|json|1
 
 @Client.on_callback_query(filters.regex("^toggle_shortener$"))
 async def toggle_shortener(client, query):
-    if not URL_SHORTENERS:
+    if not client.url_shorteners:
         return await query.answer("No providers configured!")
     
     msg = f"""<blockquote>**Toggle URL Shortener Active Status:**</blockquote>
 
 **Available Providers:**
 """
-    for key, provider in URL_SHORTENERS.items():
+    for key, provider in client.url_shorteners.items():
         status = "✅ Active" if provider.get('active', False) else "❌ Inactive"
         msg += f"• `{key}` - {provider['name']} ({status})\n"
     
@@ -931,12 +960,18 @@ async def toggle_shortener(client, query):
         res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
         provider_key = res.text.strip()
         
-        if provider_key not in URL_SHORTENERS:
+        if provider_key not in client.url_shorteners:
             return await query.message.edit_text(f"**Provider '{provider_key}' not found!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
-        provider = URL_SHORTENERS[provider_key]
+        provider = client.url_shorteners[provider_key]
         current_status = provider.get('active', False)
         provider['active'] = not current_status
+        try:
+            await _save_shortener_providers(client)
+        except Exception as e:
+            provider['active'] = current_status
+            client.LOGGER(__name__, client.name).exception(f"Failed to save URL shortener status: {e}")
+            return await query.message.edit_text("❌ Could not save provider status to database.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
         status_text = "activated" if provider['active'] else "deactivated"
         return await query.message.edit_text(f"**✅ Provider '{provider['name']}' {status_text} successfully!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
@@ -947,14 +982,14 @@ async def toggle_shortener(client, query):
 
 @Client.on_callback_query(filters.regex("^rm_shortener$"))
 async def rm_shortener(client, query):
-    if not URL_SHORTENERS:
+    if not client.url_shorteners:
         return await query.answer("No providers configured!")
     
     msg = f"""<blockquote>**Remove URL Shortener Provider:**</blockquote>
 
 **Available Providers:**
 """
-    for key, provider in URL_SHORTENERS.items():
+    for key, provider in client.url_shorteners.items():
         status = "✅ Active" if provider.get('active', False) else "❌ Inactive"
         msg += f"• `{key}` - {provider['name']} ({status})\n"
     
@@ -967,11 +1002,17 @@ async def rm_shortener(client, query):
         res = await client.listen(user_id=query.from_user.id, filters=filters.text, timeout=60)
         provider_key = res.text.strip()
         
-        if provider_key not in URL_SHORTENERS:
+        if provider_key not in client.url_shorteners:
             return await query.message.edit_text(f"**Provider '{provider_key}' not found!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
-        provider_name = URL_SHORTENERS[provider_key]['name']
-        del URL_SHORTENERS[provider_key]
+        provider_name = client.url_shorteners[provider_key]['name']
+        removed_provider = client.url_shorteners.pop(provider_key)
+        try:
+            await _save_shortener_providers(client)
+        except Exception as e:
+            client.url_shorteners[provider_key] = removed_provider
+            client.LOGGER(__name__, client.name).exception(f"Failed to remove URL shortener: {e}")
+            return await query.message.edit_text("❌ Could not save provider removal to database.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         
         return await query.message.edit_text(f"**✅ Provider '{provider_name}' removed successfully!**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('◂ ʙᴀᴄᴋ', 'url_shorteners')]]))
         

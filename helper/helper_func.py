@@ -10,12 +10,13 @@ from datetime import datetime, timedelta
 from pyrogram import errors
 from config import URL_SHORTENERS
 
-async def shorten_url(long_url: str) -> str:
+async def shorten_url(long_url: str, client=None) -> str:
     """
     Shorten URL using configured URL shortener services
     Returns shortened URL or original URL if shortening fails
     """
-    for provider_key, provider_config in URL_SHORTENERS.items():
+    providers = getattr(client, 'url_shorteners', URL_SHORTENERS)
+    for provider_key, provider_config in providers.items():
         if not provider_config.get('active', False):
             continue
             
@@ -33,10 +34,26 @@ async def shorten_url(long_url: str) -> str:
             async with aiohttp.ClientSession() as session:
                 async with session.get(api_url, params=params, timeout=10) as response:
                     if response.status == 200:
-                        short_url = await response.text()
-                        short_url = short_url.strip()
-                        if short_url and short_url.startswith('http'):
-                            return short_url
+                        body = (await response.text()).strip()
+                        if body.startswith(('http://', 'https://')):
+                            return body
+                        # Some providers wrap their short URL in a JSON response.
+                        try:
+                            payload = await response.json(content_type=None)
+                            candidates = [payload]
+                            while candidates:
+                                item = candidates.pop(0)
+                                if isinstance(item, dict):
+                                    for key, value in item.items():
+                                        if key.lower() in ('shortenedurl', 'short_url', 'shorturl', 'url', 'link') and isinstance(value, str):
+                                            if value.startswith(('http://', 'https://')):
+                                                return value
+                                        elif isinstance(value, (dict, list)):
+                                            candidates.append(value)
+                                elif isinstance(item, list):
+                                    candidates.extend(item)
+                        except Exception:
+                            pass
         except Exception as e:
             print(f"Error with {provider_key}: {e}")
             continue

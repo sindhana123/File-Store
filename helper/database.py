@@ -491,6 +491,23 @@ class MongoDB:
             upsert=True
         )
 
+    async def load_url_shorteners(self, defaults: dict | None = None) -> dict:
+        """Load URL shorteners from MongoDB, seeding defaults on first run."""
+        doc = await self.bot_config.find_one({'_id': 'url_shorteners'})
+        if doc and isinstance(doc.get('providers'), dict):
+            return doc['providers']
+        providers = defaults or {}
+        await self.save_url_shorteners(providers)
+        return providers
+
+    async def save_url_shorteners(self, providers: dict):
+        """Persist the complete URL shortener provider list."""
+        await self.bot_config.update_one(
+            {'_id': 'url_shorteners'},
+            {'$set': {'providers': providers, 'updated': datetime.now()}},
+            upsert=True
+        )
+
     async def is_credit_system_enabled(self) -> bool:
         """Check if credit system is enabled"""
         return await self.get_bot_config('credit_system_enabled', True)
