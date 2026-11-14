@@ -378,8 +378,7 @@ async def start_command(client: Client, message: Message):
             buttons = InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"⌜{sc('get files')}⌟", url=shortened_url)],
                 [
-                    InlineKeyboardButton(f"「{sc('tutorial')}」", url="https://t.me/+rKJmAabX6MxmMjg9"),
-                    InlineKeyboardButton(f"「{sc('premium')}」", url="https://t.me/Cultured_Support_bot")
+                    InlineKeyboardButton(f"「{sc('tutorial')}」", url="https://t.me/+cXmVrU0-3rMzMDM1")
                 ]
             ])
             

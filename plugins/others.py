@@ -77,7 +77,6 @@ async def premium_plans_callback(client: Client, query: CallbackQuery):
     ).format(query.from_user.first_name)
     
     buttons = [
-        [InlineKeyboardButton("💰 Bᴜʏ Pʀᴇᴍɪᴜᴍ", url="https://t.me/Cultured_Support_bot?start=0")],
         [InlineKeyboardButton("🔙 Bᴀᴄᴋ", callback_data="home")]
     ]
     
